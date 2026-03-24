@@ -211,42 +211,33 @@ void adrenotools_set_turbo(bool turbo) {
     close (kgslFd);
 }
 
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
+
 __attribute__((constructor))
 void auto_init_roblox_driver() {
-    static bool initialized = false;
-    if (initialized) return;
-    initialized = true;
-
-    __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", "MTR Driver Injector Starting...");
-
     Dl_info info;
     if (dladdr((void*)auto_init_roblox_driver, &info)) {
-        std::string full_path(info.dli_fname);
+        std::string full_path = info.dli_fname;
         std::string lib_dir = full_path.substr(0, full_path.find_last_of("/"));
-        const char* final_path = lib_dir.c_str();
+        std::string final_path = lib_dir + "/";
+        
+        const char* tmp_dir = "/data/data/com.roblox.client.samsunggalaxy/cache";
 
-        __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", "Detected Lib Path: %s", final_path);
-
-        const char* driver_name = "libvulkan_freedreno.so";
-
-        // Calling the function using the official signature
+        ALOGI("Injected! Searching for driver in: %s", final_path.c_str());
+        
         void* handle = adrenotools_open_libvulkan(
-            RTLD_NOW,
-            0x00000001, // ADRENOTOOLS_DRIVER_CUSTOM
-            nullptr,    // tmpLibDir
-            final_path, // hookLibDir
-            final_path, // customDriverDir
-            driver_name,
-            nullptr,    // fileRedirectDir
-            nullptr     // userMappingHandle (Correct void** type now)
+            RTLD_NOW, 
+            1, 
+            tmp_dir,               // tmpLibDir (Writable)
+            final_path.c_str(),    // hookLibDir (Read-only is fine)
+            final_path.c_str(),    // customDriverDir
+            "libvulkan_freedreno.so", 
+            nullptr, 
+            nullptr
         );
 
         if (handle) {
-            __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", "SUCCESS: Turnip MTR 3.0.0 loaded!");
-        } else {
-            __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", "FAILURE: AdrenoTools could not hook driver at %s", final_path);
+            ALOGI("SUCCESS: Driver is now ACTIVE!");
         }
-    } else {
-        __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", "CRITICAL: dladdr failed.");
     }
 }
