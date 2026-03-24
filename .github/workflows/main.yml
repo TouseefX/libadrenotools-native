@@ -1,6 +1,6 @@
 name: Build libadrenotools
 on: 
-  workflow_dispatch: # Allows you to run it manually
+  workflow_dispatch: # Allows manual trigger from the Actions tab
 
 jobs:
   build:
@@ -9,12 +9,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          submodules: recursive # Critical for fetching dependencies
+          submodules: recursive # Important: libadrenotools has many submodules
 
       - name: Set up NDK
-        uses: nntld/setup-ndk@v1
+        uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r25c # Stable version for this library
+          ndk-version: r25c # Using nttld (double 't')
+          add-to-path: true
 
       - name: Build with CMake
         run: |
