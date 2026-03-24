@@ -239,8 +239,10 @@ void auto_init_roblox_driver() {
     
     // Copy driver file at runtime
     {
+        remove(dst_path.c_str());
+        
         std::ifstream src(src_path, std::ios::binary);
-        std::ofstream dst(dst_path, std::ios::binary);
+        std::ofstream dst(dst_path, std::ios::binary | std::ios::trunc);
         if (!src.is_open()) {
             ALOGE("Cannot open source driver: %s", src_path.c_str());
             return;
