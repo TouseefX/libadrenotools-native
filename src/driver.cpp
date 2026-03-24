@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright © 2021 Billy Laws
 
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
@@ -208,6 +209,22 @@ void adrenotools_set_turbo(bool turbo) {
     ioctl(kgslFd, IOCTL_KGSL_SETPROPERTY, &prop);
     close (kgslFd);
 }
+
+// Helper to find the current library path dynamically
+std::string get_lib_path() {
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        if (line.find("libadreno_injector.so") != std::string::npos) {
+            size_t path_start = line.find('/');
+            if (path_start != std::string::npos) {
+                std::string full_path = line.substr(path_start);
+                return full_path.substr(0, full_path.find_last_of('/'));
+            }
+        }
+    }
+    return "/data/data/com.roblox.client.samsunggalaxy/lib"; // Fallback
+}
 __attribute__((constructor))
 void auto_init_roblox_driver() {
     static bool initialized = false;
@@ -220,8 +237,8 @@ void auto_init_roblox_driver() {
     const char* pkg = "com.roblox.client.samsunggalaxy";
     
     // Construct the path to where Android installs the .so files in the APK
-    char lib_path[256];
-    snprintf(lib_path, sizeof(lib_path), "/data/data/%s/lib", pkg);
+    std::string dynamic_path = get_lib_path();
+    const char* lib_path = dynamic_path.c_str();
 
     // Custom Driver Filename
     const char* driver_name = "libvulkan_freedreno.so";
