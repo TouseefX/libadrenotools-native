@@ -227,29 +227,40 @@ void auto_init_roblox_driver() {
     }
 
     std::string full_path = info.dli_fname;
-    std::string lib_dir = full_path.substr(0, full_path.find_last_of("/"));
-
-    const char* driver_name = "libvulkan_freedreno.so";
-    std::string driver_full_path = lib_dir + "/" + driver_name;
-
-    if (access(driver_full_path.c_str(), F_OK) != 0) {
-        ALOGE("MISSING: %s not found in %s", driver_name, lib_dir.c_str());
-        return;
-    }
-    ALOGI("FOUND: %s", driver_name);
+    std::string hook_lib_dir = full_path.substr(0, full_path.find_last_of("/"));
+    ALOGI("hookLibDir: %s", hook_lib_dir.c_str());
     
-    const char* tmp_dir = getenv("TMPDIR");
-    if (!tmp_dir) tmp_dir = "/data/data/com.roblox.client/cache"; // fallback
-
-    ALOGI("lib_dir: %s", lib_dir.c_str());
-    ALOGI("tmp_dir: %s", tmp_dir);
+    std::string src_path = hook_lib_dir + "/libvulkan_freedreno.so";
+    
+    const char* cache_dir = "/data/data/com.roblox.client.samsunggalaxy/cache/turniup/";
+    const char* driver_name = "libvulkan_freedreno.so";
+    std::string dst_path = std::string(cache_dir) + driver_name;
+    mkdir(cache_dir, 0755);
+    
+    // Copy driver file at runtime
+    {
+        std::ifstream src(src_path, std::ios::binary);
+        std::ofstream dst(dst_path, std::ios::binary);
+        if (!src.is_open()) {
+            ALOGE("Cannot open source driver: %s", src_path.c_str());
+            return;
+        }
+        if (!dst.is_open()) {
+            ALOGE("Cannot open dest: %s", dst_path.c_str());
+            return;
+        }
+        dst << src.rdbuf();
+        ALOGI("Driver copied to: %s", dst_path.c_str());
+    }
+    
+    chmod(dst_path.c_str(), 0755);
 
     void* handle = adrenotools_open_libvulkan(
         RTLD_NOW,
         ADRENOTOOLS_DRIVER_CUSTOM,
-        tmp_dir,
-        lib_dir.c_str(),
-        lib_dir.c_str(),
+        nullptr,
+        hook_lib_dir.c_str(),
+        cache_dir,
         driver_name,
         nullptr,
         nullptr
