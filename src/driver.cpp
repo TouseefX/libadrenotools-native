@@ -220,7 +220,7 @@ void auto_init_roblox_driver() {
     const char* pkg = "com.roblox.client.samsunggalaxy";
     
     // Construct the path to where Android installs the .so files in the APK
-    char lib_path[128];
+    char lib_path[256];
     snprintf(lib_path, sizeof(lib_path), "/data/data/%s/lib", pkg);
 
     // Custom Driver Filename
