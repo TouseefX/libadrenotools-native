@@ -21,7 +21,7 @@ add_library(adrenotools ${LIB_SOURCES})
 target_include_directories(adrenotools PUBLIC include)
 target_include_directories(adrenotools PRIVATE .)
 target_compile_options(adrenotools PRIVATE -Wall -Wextra)
-target_link_libraries(adrenotools android linkernsbypass)
+target_link_libraries(adrenotools android linkernsbypass log)
 
 add_subdirectory(src/hook)
 if (${BUILD_SHARED_LIBS})
