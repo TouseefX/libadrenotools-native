@@ -310,8 +310,6 @@ static void init_turnip_driver() {
     setenv("ADRENOTOOLS_DRIVER_FILE", dst_path.c_str(), 1);
     
     const char* system_lib_dir = "/system/lib64";
-    std::string redirect_dir = base_data_dir + "/cache/redirect/";
-    mkdir(redirect_dir.c_str(), 0755);
     
     void* handle = adrenotools_open_libvulkan(
        RTLD_NOW,                 // dlopenMode
@@ -320,7 +318,7 @@ static void init_turnip_driver() {
        hook_lib_dir.c_str(),     // hookLibDir
        cache_dir.c_str(),        // customDriverDir (where you copied Turnip)
        driver_name.c_str(),      // customDriverName (libvulkan_freedreno.so)
-       redirect_dir.c_str(),                  // fileRedirectDir (not needed usually)
+       nullptr,                  // fileRedirectDir (not needed usually)
        nullptr                   // userMappingHandle (not needed usually)
     );
 
