@@ -282,7 +282,5 @@ void auto_init_roblox_driver() {
 
     if (handle) {
         ALOGI("SUCCESS: Custom driver active!");
-    } else {
-        ALOGE("FAILURE: %s", dlerror());
     }
 }
