@@ -292,24 +292,12 @@ static void init_turnip_driver() {
     }
 }
 
-// Hook vkGetInstanceProcAddr instead of using constructor
-// This fires when Roblox first touches Vulkan, not at load time
-extern "C" __attribute__((visibility("default")))
-void* vkGetInstanceProcAddr(void* instance, const char* name) {
+__attribute__((constructor))
+void auto_init_roblox_driver() {
     static bool initialized = false;
-    if (!initialized) {
-        initialized = true;
-        ALOGI("vkGetInstanceProcAddr called, initializing driver...");
-        init_turnip_driver();
-    }
-
-    // Forward to real Vulkan
-    static void* real_vk = nullptr;
-    if (!real_vk) {
-        void* libvulkan = dlopen("/system/lib64/libvulkan.so", RTLD_NOW | RTLD_NOLOAD);
-        real_vk = dlsym(libvulkan, "vkGetInstanceProcAddr");
-    }
-
-    auto real = reinterpret_cast<void*(*)(void*, const char*)>(real_vk);
-    return real ? real(instance, name) : nullptr;
+    if (initialized) return;
+    initialized = true;
+    
+    // rest of your code...
+    init_turnip_driver();
 }
