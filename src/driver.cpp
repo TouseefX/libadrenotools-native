@@ -23,69 +23,80 @@
 
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     // Bail out if linkernsbypass failed to load, this probably means we're on api < 28
-    if (!linkernsbypass_load_status())
+    if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
         return nullptr;
+    }
 
     // Always use memfd on Q+ since it's guaranteed to work only if tmplib is not set
     if (android_get_device_api_level() >= 29 && !tmpLibDir)
         tmpLibDir = nullptr;
 
     // Verify that params for specific features are only passed if they are enabled
-    if (!(featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && fileRedirectDir)
+    if (!(featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && fileRedirectDir) {
          ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT present but no file redirect folder found\n");
         return nullptr;
+    }
 
-    if (!(featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && (customDriverDir || customDriverName))
+    if (!(featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && (customDriverDir || customDriverName)) {
         ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder found\n");
         return nullptr;
+    }
 
-    if (!(featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) && userMappingHandle)
+    if (!(featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) && userMappingHandle) {
         ALOGE("FAILURE: ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT present but no user mapping handle found\n");
         return nullptr;
+    }
 
     // Verify that params for enabled features are correct
     struct stat buf{};
 
     if (featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
-        if (!customDriverName || !customDriverDir)
+        if (!customDriverName || !customDriverDir) {
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder parameter was specified\n");
             return nullptr;
+        }
 
-        if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0)
+        if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0) {
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist\n");
             return nullptr;
+        }
     }
 
     // Verify that params for enabled features are correct
     if (featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
-        if (!fileRedirectDir)
+        if (!fileRedirectDir) {
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but no folder parameter was found\n");
             return nullptr;
+        }
 
-        if (stat(fileRedirectDir, &buf) != 0)
+        if (stat(fileRedirectDir, &buf) != 0) {
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but specified redirect folder doesn't exist\n");
             return nullptr;
+        }
     }
 
     // Create a namespace that can isolate our hook from the classloader namespace
     auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
 
     // Link it to the default namespace so the hook can use libandroid etc
-    if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs))
+    if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs)) {
         return nullptr;
+    }
 
     // Preload the hook implementation, otherwise we get a weird issue where despite being in NEEDED of the hook lib the hook's symbols will overwrite ours and cause an infinite loop
     auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, hookNs)};
-    if (!hookImpl)
+    if (!hookImpl) {
         ALOGE("FAILURE: Couldn't preload the hook implementation\n");
         return nullptr;
+    }
 
     // Pass parameters to the hook implementation
     auto initHookParam{reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"))};
-    if (!initHookParam)
+    if (!initHookParam) {
         ALOGE("FAILURE: Couldn't init hook params\n");
         return nullptr;
+    }
 
 
     auto importMapping{[&]() -> adrenotools_gpu_mapping * {
@@ -103,9 +114,10 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
     initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
 
     // Load the libvulkan hook into the isolated namespace
-    if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs))
+    if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs)) {
         ALOGE("FAILURE: Failed to load libvulkan into the isolated namespace\n");
         return nullptr;
+    }
 
     return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
 }
