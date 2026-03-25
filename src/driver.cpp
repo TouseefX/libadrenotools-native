@@ -25,7 +25,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
     // Bail out if linkernsbypass failed to load, this probably means we're on api < 28
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
-        return nullptr;
+        // return nullptr;
     }
 
     // Always use memfd on Q+ since it's guaranteed to work only if tmplib is not set
