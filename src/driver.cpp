@@ -283,17 +283,21 @@ static void init_turnip_driver() {
               src_path.c_str(), src.is_open(), dst_path.c_str(), dst.is_open());
         return;
     }
+    
+    setenv("VK_ICD_FILENAMES", dst_path.c_str(), 1);
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "turnip", 1);
+    setenv("DISABLE_VULKAN_SWAPCHAIN_LAYER", "1", 1);
+    setenv("ADRENOTOOLS_DRIVER_FILE", dst_path.c_str(), 1);
 
-    // 6. Load with adrenotools
     void* handle = adrenotools_open_libvulkan(
-        RTLD_NOW,
-        ADRENOTOOLS_DRIVER_CUSTOM,
-        nullptr,
-        hook_lib_dir.c_str(),
-        cache_dir.c_str(),
-        driver_name.c_str(),
-        nullptr,
-        nullptr
+       RTLD_NOW,                 // dlopenMode
+       ADRENOTOOLS_DRIVER_CUSTOM, // featureFlags
+       cache_dir.c_str(),        // tmpLibDir (CRITICAL: needs a writable path for hooks)
+       hook_lib_dir.c_str(),     // hookLibDir (where your patched .so lives)
+       cache_dir.c_str(),        // customDriverDir (where you copied Turnip)
+       driver_name.c_str(),      // customDriverName (libvulkan_freedreno.so)
+       nullptr,                  // fileRedirectDir (not needed usually)
+       nullptr                   // userMappingHandle (not needed usually)
     );
 
     if (handle) {
