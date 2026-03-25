@@ -242,15 +242,6 @@ void adrenotools_set_turbo(bool turbo) {
 }
 
 static void init_turnip_driver() {
-    // 1. Get the current process package/data directory dynamically
-    struct passwd* pw = getpwuid(getuid());
-    if (!pw || !pw->pw_dir) {
-        ALOGE("Failed to get process data directory");
-        return;
-    }
-    std::string base_data_dir = pw->pw_dir; // e.g., /data/user/0/com.example.app
-
-    // 2. Identify where this library is located
     Dl_info info;
     if (!dladdr((void*)init_turnip_driver, &info) || !info.dli_fname) {
         ALOGE("dladdr failed");
@@ -259,25 +250,37 @@ static void init_turnip_driver() {
     
     std::string hook_lib_dir = std::string(info.dli_fname).substr(0, std::string(info.dli_fname).find_last_of("/"));
     
-    // 3. Set up dynamic cache paths
+    std::string pkg_name;
+    std::ifstream cmdline("/proc/self/cmdline");
+    if (!(cmdline >> pkg_name)) {
+        ALOGE("Failed to read cmdline");
+        return;
+    }
+    // Clean null terminator if present
+    pkg_name = pkg_name.c_str(); 
+    
+    std::string base_data_dir = "/data/data/" + pkg_name;
     std::string cache_dir = base_data_dir + "/cache/turnip/";
+    
+    mkdir((base_data_dir + "/cache").c_str(), 0777); 
+    mkdir(cache_dir.c_str(), 0777);
+    
     std::string driver_name = "libvulkan_freedreno.so";
     std::string src_path = hook_lib_dir + "/" + driver_name;
     std::string dst_path = cache_dir + driver_name;
-
-    // 4. Ensure directory exists
-    mkdir(cache_dir.c_str(), 0755);
     
-    // 5. Copy driver (Using filesystem or standard streams)
     std::ifstream src(src_path, std::ios::binary);
     std::ofstream dst(dst_path, std::ios::binary | std::ios::trunc);
+    
     if (src.is_open() && dst.is_open()) {
         dst << src.rdbuf();
         dst.close();
         src.close();
         chmod(dst_path.c_str(), 0755);
+        ALOGI("Successfully copied driver to %s", dst_path.c_str());
     } else {
-        ALOGE("Failed to copy driver from %s to %s", src_path.c_str(), dst_path.c_str());
+        ALOGE("Copy failed! Src: %s (Open: %d), Dst: %s (Open: %d)", 
+              src_path.c_str(), src.is_open(), dst_path.c_str(), dst.is_open());
         return;
     }
 
@@ -294,9 +297,9 @@ static void init_turnip_driver() {
     );
 
     if (handle) {
-        ALOGI("✓ Custom Vulkan driver loaded for %s", base_data_dir.c_str());
+        ALOGI("✓ Turnip driver loaded for %s", pkg_name.c_str());
     } else {
-        ALOGE("✗ adrenotools_open_libvulkan failed");
+        ALOGE("✗ adrenotools_open_libvulkan failed for %s", pkg_name.c_str());
     }
 }
 
