@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <thread>
 #include <chrono>
+#include <pwd.h>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
@@ -241,79 +242,66 @@ void adrenotools_set_turbo(bool turbo) {
 }
 
 static void init_turnip_driver() {
-    // Get library path more reliably
-    char exe_path[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len == -1) {
-        ALOGE("readlink failed");
+    // 1. Get the current process package/data directory dynamically
+    struct passwd* pw = getpwuid(getuid());
+    if (!pw || !pw->pw_dir) {
+        ALOGE("Failed to get process data directory");
         return;
     }
-    exe_path[len] = '\0';
-    
-    // Get the directory of THIS injected library instead
+    std::string base_data_dir = pw->pw_dir; // e.g., /data/user/0/com.example.app
+
+    // 2. Identify where this library is located
     Dl_info info;
     if (!dladdr((void*)init_turnip_driver, &info) || !info.dli_fname) {
-        ALOGE("dladdr failed, using /system/lib64");
-        // Fallback - driver should be in the same directory as this .so
-    }
-    
-    std::string hook_lib_dir = info.dli_fname ? 
-        std::string(info.dli_fname).substr(0, std::string(info.dli_fname).find_last_of("/")) :
-        "/system/lib64";
-    
-    ALOGI("hookLibDir: %s", hook_lib_dir.c_str());
-    
-    std::string src_path = hook_lib_dir + "/libvulkan_freedreno.so";
-    const char* cache_dir = "/data/data/com.roblox.client.samsunggalaxy/cache/turniup/";
-    const char* driver_name = "libvulkan_freedreson.so";
-    std::string dst_path = std::string(cache_dir) + driver_name;
-    
-    // Ensure directory exists with proper permissions
-    mkdir(cache_dir, 0755);
-    chmod(cache_dir, 0755);
-    
-    // Copy driver
-    remove(dst_path.c_str());
-    std::ifstream src(src_path, std::ios::binary);
-    if (!src.is_open()) {
-        ALOGE("Cannot open source: %s (does it exist?)", src_path.c_str());
+        ALOGE("dladdr failed");
         return;
     }
     
-    std::ofstream dst(dst_path, std::ios::binary | std::ios::trunc);
-    if (!dst.is_open()) {
-        ALOGE("Cannot write to: %s (permissions?)", dst_path.c_str());
-        return;
-    }
+    std::string hook_lib_dir = std::string(info.dli_fname).substr(0, std::string(info.dli_fname).find_last_of("/"));
     
-    dst << src.rdbuf();
-    src.close();
-    dst.close();
-    
-    chmod(dst_path.c_str(), 0755);
-    ALOGI("Driver copied: %s", dst_path.c_str());
+    // 3. Set up dynamic cache paths
+    std::string cache_dir = base_data_dir + "/cache/turnip/";
+    std::string driver_name = "libvulkan_freedreno.so";
+    std::string src_path = hook_lib_dir + "/" + driver_name;
+    std::string dst_path = cache_dir + driver_name;
 
-    // Load with adrenotools
+    // 4. Ensure directory exists
+    mkdir(cache_dir.c_str(), 0755);
+    
+    // 5. Copy driver (Using filesystem or standard streams)
+    std::ifstream src(src_path, std::ios::binary);
+    std::ofstream dst(dst_path, std::ios::binary | std::ios::trunc);
+    if (src.is_open() && dst.is_open()) {
+        dst << src.rdbuf();
+        dst.close();
+        src.close();
+        chmod(dst_path.c_str(), 0755);
+    } else {
+        ALOGE("Failed to copy driver from %s to %s", src_path.c_str(), dst_path.c_str());
+        return;
+    }
+
+    // 6. Load with adrenotools
     void* handle = adrenotools_open_libvulkan(
         RTLD_NOW,
         ADRENOTOOLS_DRIVER_CUSTOM,
         nullptr,
         hook_lib_dir.c_str(),
-        cache_dir,
-        driver_name,
+        cache_dir.c_str(),
+        driver_name.c_str(),
         nullptr,
         nullptr
     );
 
     if (handle) {
-        ALOGI("✓ Custom Vulkan driver loaded!");
+        ALOGI("✓ Custom Vulkan driver loaded for %s", base_data_dir.c_str());
     } else {
         ALOGE("✗ adrenotools_open_libvulkan failed");
     }
 }
 
 __attribute__((constructor(101)))
-void auto_init_roblox_driver() {
+void auto_init_driver() {
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
