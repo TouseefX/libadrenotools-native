@@ -17,6 +17,8 @@
 #include "hook/hook_impl_params.h"
 #include <adrenotools/driver.h>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
