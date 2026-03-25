@@ -284,19 +284,42 @@ static void init_turnip_driver() {
         return;
     }
     
-    setenv("VK_ICD_FILENAMES", dst_path.c_str(), 1);
+    std::string ld_library_path = getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "";
+    ld_library_path = cache_dir + ":" + hook_lib_dir + ":" + ld_library_path;
+    
+    std::string icd_json_path = cache_dir + "libvulkan_freedreno.json";
+    std::string icd_json_content = R"({
+        "file_format_version": "1.0.0",
+        "ICD": {
+            "library_path": ")" + cache_dir + driver_name + R"(",
+            "api_version": "1.3.0"
+        }
+    })";
+
+    std::ofstream icd_file(icd_json_path);
+    if (icd_file.is_open()) {
+        icd_file << icd_json_content;
+        icd_file.close();
+    }
+
+    setenv("VK_ICD_FILENAMES", icd_json_path.c_str(), 1);
+    setenv("LD_LIBRARY_PATH", ld_library_path.c_str(), 1);
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "turnip", 1);
     setenv("DISABLE_VULKAN_SWAPCHAIN_LAYER", "1", 1);
     setenv("ADRENOTOOLS_DRIVER_FILE", dst_path.c_str(), 1);
-
+    
+    const char* system_lib_dir = "/system/lib64";
+    std::string redirect_dir = base_data_dir + "/cache/redirect/";
+    mkdir(redirect_dir.c_str(), 0755);
+    
     void* handle = adrenotools_open_libvulkan(
        RTLD_NOW,                 // dlopenMode
        ADRENOTOOLS_DRIVER_CUSTOM, // featureFlags
        cache_dir.c_str(),        // tmpLibDir (CRITICAL: needs a writable path for hooks)
-       hook_lib_dir.c_str(),     // hookLibDir (where your patched .so lives)
+       hook_lib_dir.c_str(),     // hookLibDir
        cache_dir.c_str(),        // customDriverDir (where you copied Turnip)
        driver_name.c_str(),      // customDriverName (libvulkan_freedreno.so)
-       nullptr,                  // fileRedirectDir (not needed usually)
+       redirect_dir.c_str(),                  // fileRedirectDir (not needed usually)
        nullptr                   // userMappingHandle (not needed usually)
     );
 
@@ -307,13 +330,13 @@ static void init_turnip_driver() {
     }
 }
 
-__attribute__((constructor(101)))
+__attribute__((constructor(0)))
 void auto_init_driver() {
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
     
-    std::thread([]() {
+    std::thread loader([]() {
         int timeout_ms = 1000; // Stop trying after 1 second
         int elapsed = 0;
 
@@ -329,5 +352,6 @@ void auto_init_driver() {
         // The moment it's ready, run the driver init immediately
         ALOGI("linkernsbypass ready after %dms. Initializing Turnip...", elapsed);
         init_turnip_driver();
-    }).detach();
+    });
+    loader.join();
 }
