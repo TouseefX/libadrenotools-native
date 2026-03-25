@@ -9,7 +9,7 @@ A library for applying rootless Adreno GPU driver modifications/replacements. Cu
 API is documented in the `include/adrenotools` headers.
 
 #### Support
-Android 9+
+Android 10+
 Arm64
 
 Please create an issue if support for anything else is desired.
