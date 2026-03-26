@@ -291,7 +291,7 @@ static void init_turnip_driver() {
     mkdir(cache_dir.c_str(), 0777);
     chmod(cache_dir.c_str(), 0777);
     
-    std::string driver_name = "vulkan.adreno.so";
+    std::string driver_name = "libvulkan_freedreno.so";
     std::string src_path = hook_lib_dir + "/libvulkan_freedreno.so";
     std::string dst_path = cache_dir + driver_name;
     
@@ -337,11 +337,15 @@ static void init_turnip_driver() {
     setenv("DISABLE_VULKAN_SWAPCHAIN_LAYER", "1", 1);
     
     const char* system_lib_dir = "/system/lib64";
+
+    std::string tmp_dir = cache_dir + "temp";
+    mkdir(tmp_dir.c_str(), 0777);
+    chmod(tmp_dir.c_str(), 0777);
     
     void* handle = adrenotools_open_libvulkan(
-       RTLD_NOW,                 // dlopenMode
+       RTLD_LOCAL | RTLD_NOW,                 // dlopenMode
        ADRENOTOOLS_DRIVER_CUSTOM, // featureFlags
-       cache_dir.c_str(),        // tmpLibDir (CRITICAL: needs a writable path for hooks)
+       tmp_dir.c_str(),        // tmpLibDir (CRITICAL: needs a writable path for hooks)
        hook_lib_dir.c_str(),     // hookLibDir
        cache_dir.c_str(),        // customDriverDir (where you copied Turnip)
        driver_name.c_str(),      // customDriverName (libvulkan_freedreno.so)
