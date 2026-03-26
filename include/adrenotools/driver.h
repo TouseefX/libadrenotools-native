@@ -66,6 +66,18 @@ bool adrenotools_validate_gpu_mapping(void *handle);
  */
 void adrenotools_set_turbo(bool turbo);
 
+/**
+ * @brief Sets a Freedreno/Turnip environment variable for driver configuration
+ * @param varName The environment variable name (e.g., "TU_DEBUG", "FD_RD_DUMP", "FD_MESA_DEBUG")
+ * @param value The value to set
+ * @note IMPORTANT: Must be called BEFORE adrenotools_open_libvulkan() to take effect
+ * @note Valid options documented at https://docs.mesa3d.org/drivers/freedreno.html
+ * @note Example TU_DEBUG values: "sysmem", "gmem", "nobin", "forcebin", "noubwc", "nolrz"
+ * @note Example FD_RD_DUMP values: "enable", "combine", "full", "trigger"
+ * @return true on success, false if varName or value is NULL
+ */
+bool adrenotools_set_freedreno_env(const char *varName, const char *value);
+
 #ifdef __cplusplus
 }
 #endif
