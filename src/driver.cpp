@@ -334,6 +334,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     char* native_lib_dir = nullptr;
     char* tmpdir = nullptr;
 
+    uint32_t featureFlags = ADRENOTOOLS_DRIVER_CUSTOM | ADRENOTOOLS_DRIVER_FILE_REDIRECT;
+
     // Get paths via Context API (more reliable than /data/data/)
     driver_path = get_driver_path(env, context);
     if (!driver_path || access(driver_path, F_OK) != 0) {
@@ -365,7 +367,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     setenv("TU_DEBUG", "sysmem", 1);
 
     // Open libvulkan with custom driver
-    uint32_t featureFlags = ADRENOTOOLS_DRIVER_CUSTOM | ADRENOTOOLS_DRIVER_FILE_REDIRECT
     g_vulkan_handle = adrenotools_open_libvulkan(
         RTLD_LOCAL | RTLD_NOW,              // dlopenMode
         featureFlags,          // featureFlags
