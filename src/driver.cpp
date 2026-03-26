@@ -331,7 +331,7 @@ static char* get_driver_path(JNIEnv* env, jobject context) {
 
 // Hooked dlopen — intercept when the game opens libvulkan.so
 static void* hooked_dlopen(const char* filename, int flags) {
-    if (filename && strstr(filename, "libvulkan.so")) {
+    if (filename && strstr(filename, "vulkan.adreno.so")) {
         if (g_turnip_handle) {
             ALOGI("Redirecting libvulkan.so dlopen to Turnip handle");
             return g_turnip_handle;
@@ -347,6 +347,18 @@ static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, cons
     }
     // fallback to system
     return vkGetInstanceProcAddr(instance, pName);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumeratePhysicalDevices(VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices) {
+    auto func = (PFN_vkEnumeratePhysicalDevices)g_turnip_gipa(instance, "vkEnumeratePhysicalDevices");
+    return func(instance, pPhysicalDeviceCount, pPhysicalDevices);
+}
+
+static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+    if (g_turnip_gipa) {
+        return g_turnip_gipa((VkInstance)device, pName);
+    }
+    return vkGetDeviceProcAddr(device, pName);
 }
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
@@ -388,9 +400,12 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Turnip loaded, setting up hooks...");
     
-    xhook_register(".*libUnity\\.so$", "dlopen", hooked_dlopen, NULL);
-    xhook_register(".*libUnity\\.so$", "vkGetInstanceProcAddr",
+    xhook_register(".*\\.so$", "dlopen", hooked_dlopen, NULL);
+    xhook_register(".*\\.so$", "vkGetInstanceProcAddr",
                     hooked_vkGetInstanceProcAddr, NULL);
+    xhook_register(".*\\.so$", "vkCreateInstance", (void*)hooked_vkGetInstanceProcAddr(NULL, "vkCreateInstance"), NULL);
+    xhook_register(".*\\.so$", "vkEnumeratePhysicalDevices", (void*)hooked_vkEnumeratePhysicalDevices, NULL);
+    xhook_register(".*\\.so$", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
     
     xhook_refresh(0);
 
