@@ -367,14 +367,15 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     setenv("TU_DEBUG", "sysmem", 1);
 
     // Open libvulkan with custom driver
+    uint32_t featureFlags = ADRENOTOOLS_DRIVER_CUSTOM | ADRENOTOOLS_DRIVER_FILE_REDIRECT
     g_vulkan_handle = adrenotools_open_libvulkan(
         RTLD_LOCAL | RTLD_NOW,              // dlopenMode
-        ADRENOTOOLS_DRIVER_CUSTOM,          // featureFlags
+        featureFlags,          // featureFlags
         tmpdir,                             // tmpLibDir (CRITICAL for hooks)
         native_lib_dir,                     // hookLibDir
         driver_path,                        // customDriverDir
         "libvulkan_freedreno.so",           // customDriverName
-        nullptr,                            // fileRedirectDir
+        driver_path,                            // fileRedirectDir
         nullptr                             // userMappingHandle
     );
 
