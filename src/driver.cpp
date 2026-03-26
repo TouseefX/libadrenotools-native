@@ -328,9 +328,10 @@ static void init_turnip_driver() {
         icd_file.close();
     }
 
+    adrenotools_set_freedreno_env("VK_DRIVER_FILES", icd_json_path.c_str());
     adrenotools_set_freedreno_env("VK_ICD_FILENAMES", icd_json_path.c_str());
     adrenotools_set_freedreno_env("MESA_LOADER_DRIVER_OVERRIDE", "turnip");
-    adrenotools_set_freedreno_env("TU_DEBUG", "sysmem");
+    adrenotools_set_freedreno_env("TU_DEBUG", "sysmem,gmem,force_vk_vendor=0x5143");
     
     setenv("LD_LIBRARY_PATH", ld_library_path.c_str(), 1);
     setenv("DISABLE_VULKAN_SWAPCHAIN_LAYER", "1", 1);
