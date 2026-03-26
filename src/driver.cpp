@@ -282,10 +282,14 @@ static void init_turnip_driver() {
     pkg_name = pkg_name.c_str(); 
     
     std::string base_data_dir = "/data/data/" + pkg_name;
-    std::string cache_dir = base_data_dir + "/cache/turnip/";
+    std::string cache_parent = base_data_dir + "/cache";
+    std::string cache_dir = cache_parent + "/turnip/";
     
-    mkdir((base_data_dir + "/cache").c_str(), 0777); 
+    mkdir(cache_parent.c_str(), 0777); 
+    chmod(cache_parent.c_str(), 0777);
+    
     mkdir(cache_dir.c_str(), 0777);
+    chmod(cache_dir.c_str(), 0777);
     
     std::string driver_name = "vulkan.adreno.so";
     std::string src_path = hook_lib_dir + "/libvulkan_freedreno.so";
