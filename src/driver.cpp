@@ -365,10 +365,11 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     // Only set these if adrenotools doesn't set them properly:
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "turnip", 1);
     setenv("TU_DEBUG", "sysmem", 1);
+    setenv("VK_LOADER_DEBUG", "all", 1);
 
     // Open libvulkan with custom driver
     g_vulkan_handle = adrenotools_open_libvulkan(
-        RTLD_LOCAL | RTLD_NOW,              // dlopenMode
+        RTLD_GLOBAL | RTLD_NOW,              // dlopenMode
         featureFlags,          // featureFlags
         tmpdir,                             // tmpLibDir (CRITICAL for hooks)
         native_lib_dir,                     // hookLibDir
