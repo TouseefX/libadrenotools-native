@@ -305,25 +305,26 @@ static char* get_driver_path(JNIEnv* env, jobject context) {
     char* driver_path = nullptr;
 
     if (context != nullptr) {
-        jclass class_ = env->FindClass("android/content/ContextWrapper");
-        if (!class_) return nullptr;
+        jclass contextClass = env->FindClass("android/content/Context");
+        jmethodID getAppInfo = env->GetMethodID(contextClass, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+        jobject appInfo = env->CallObjectMethod(context, getAppInfo);
+        
+        jclass appInfoClass = env->GetObjectClass(appInfo);
+        jfieldID nativeLibraryDirField = env->GetFieldID(appInfoClass, "nativeLibraryDir", "Ljava/lang/String;");
+        jstring nativeLibraryDir = (jstring)env->GetObjectField(appInfo, nativeLibraryDirField);
 
-        jmethodID getFilesDir = env->GetMethodID(class_, "getFilesDir", "()Ljava/io/File;");
-        jobject filesDirObj = env->CallObjectMethod(context, getFilesDir);
-        jclass fileClass = env->GetObjectClass(filesDirObj);
-        jmethodID getAbsolutePath = env->GetMethodID(fileClass, "getAbsolutePath", "()Ljava/lang/String;");
-
-        jstring absolutePath = (jstring)env->CallObjectMethod(filesDirObj, getAbsolutePath);
-        if (absolutePath) {
-            const char* path_chars = env->GetStringUTFChars(absolutePath, nullptr);
+        if (nativeLibraryDir) {
+            const char* path_chars = env->GetStringUTFChars(nativeLibraryDir, nullptr);
             if (path_chars) {
-                if (asprintf(&driver_path, "%s/turnip/", path_chars) == -1)
-                    driver_path = nullptr;
-                env->ReleaseStringUTFChars(absolutePath, path_chars);
+                driver_path = strdup(path_chars);
+                env->ReleaseStringUTFChars(nativeLibraryDir, path_chars);
             }
         }
-
-        env->DeleteLocalRef(class_);
+        
+        // Clean up local references
+        env->DeleteLocalRef(contextClass);
+        env->DeleteLocalRef(appInfo);
+        env->DeleteLocalRef(appInfoClass);
     }
 
     return driver_path;
@@ -390,7 +391,7 @@ cleanup:
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_yourpackage_TurnipLoader_initTurnipDriver(JNIEnv* env, jclass clazz, jobject context) {
+Java_com_game_TurnipLoader_initTurnipDriver(JNIEnv* env, jclass clazz, jobject context) {
     if (!context) {
         ALOGE("Context is null!");
         return;
