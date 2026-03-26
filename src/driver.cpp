@@ -20,8 +20,10 @@
 #include <thread>
 #include <chrono>
 #include <pwd.h>
+#include <cstring>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
+#define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
 
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
@@ -56,12 +58,12 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
 
     if (featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
         if (!customDriverName || !customDriverDir) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder parameter was specified\n");
+            ALOGW("WARN: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder parameter was specified\n");
             return nullptr;
         }
 
         if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist\n");
+            ALOGW("WARN: ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist\n");
             return nullptr;
         }
     }
@@ -69,12 +71,12 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
     // Verify that params for enabled features are correct
     if (featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
         if (!fileRedirectDir) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but no folder parameter was found\n");
+            ALOGW("WARN: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but no folder parameter was found\n");
             return nullptr;
         }
 
         if (stat(fileRedirectDir, &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but specified redirect folder doesn't exist\n");
+            ALOGW("WARN: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but specified redirect folder doesn't exist\n");
             return nullptr;
         }
     }
@@ -109,7 +111,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
             *userMappingHandle = mapping;
             return mapping;
         } else {
-        	ALOGE("FAILURE: Memory mapping flag was not specified\n");
+        	ALOGW("WARN: Memory mapping flag was not specified\n");
             return nullptr;
         }
     }()};
@@ -241,6 +243,25 @@ void adrenotools_set_turbo(bool turbo) {
     close (kgslFd);
 }
 
+bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
+    if (!varName || !value || std::strlen(varName) == 0)
+        return false;
+
+    int result = setenv(varName, value, 1);
+    if (result != 0) {
+        ALOGE("FAILURE adrenotools_set_freedreno_env: Failed to set '%s' (errno: %d)", varName, errno);
+        return false;
+    }
+
+    const char *verifyValue = std::getenv(varName);
+    if (verifyValue && std::strcmp(verifyValue, value) == 0) {
+        return true;
+    } else {
+        ALOGW("WARN adrenotools_set_freedreno_env: Verification failed for '%s'", varName);
+        return false;
+    }
+}
+
 static void init_turnip_driver() {
     Dl_info info;
     if (!dladdr((void*)init_turnip_driver, &info) || !info.dli_fname) {
@@ -308,12 +329,13 @@ static void init_turnip_driver() {
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "turnip", 1);
     setenv("DISABLE_VULKAN_SWAPCHAIN_LAYER", "1", 1);
     setenv("ADRENOTOOLS_DRIVER_FILE", dst_path.c_str(), 1);
+    setenv("TU_DEBUG", "sysmem", 1);
     
     const char* system_lib_dir = "/system/lib64";
     
     void* handle = adrenotools_open_libvulkan(
        RTLD_NOW,                 // dlopenMode
-       ADRENOTOOLS_DRIVER_CUSTOM, // featureFlags
+       ADRENOTOOLS_DRIVER_CUSTOM | ADRENOTOOLS_GPU_DEFAULT_CUSTOM, // featureFlags
        cache_dir.c_str(),        // tmpLibDir (CRITICAL: needs a writable path for hooks)
        hook_lib_dir.c_str(),     // hookLibDir
        cache_dir.c_str(),        // customDriverDir (where you copied Turnip)
@@ -329,28 +351,14 @@ static void init_turnip_driver() {
     }
 }
 
-__attribute__((constructor(1)))
-void auto_init_driver() {
-    static bool initialized = false;
-    if (initialized) return;
-    initialized = true;
-    
-    std::thread loader([]() {
-        int timeout_ms = 5000; // Stop trying after 1 second
-        int elapsed = 0;
+extern "C" jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+    ALOGI("JNI_OnLoad: Initializing Turnip Driver...");
 
-        while (!linkernsbypass_load_status()) {
-            if (elapsed >= timeout_ms) {
-                ALOGE("FAILURE: linkernsbypass timed out after 1s");
-                return;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            elapsed++;
-        }
+    if (!linkernsbypass_load_status()) {
+        ALOGW("Linker bypass not ready in JNI_OnLoad, attempting anyway...");
+    }
 
-        // The moment it's ready, run the driver init immediately
-        ALOGI("linkernsbypass ready after %dms. Initializing Turnip...", elapsed);
-        init_turnip_driver();
-    });
-    loader.detach();
+    init_turnip_driver();
+
+    return JNI_VERSION_1_6;
 }
