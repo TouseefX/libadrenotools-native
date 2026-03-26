@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright © 2021 Billy Laws
 
+#include <vulkan/vulkan.h>
 #include <fstream>
 #include <string>
 #include <string_view>
@@ -8,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <android/api-level.h>
@@ -264,111 +266,141 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 }
 
 static void* g_vulkan_handle = nullptr;
+static JavaVM* g_java_vm = nullptr;
 
-static void init_turnip_driver() {
-    Dl_info info;
-    if (!dladdr((void*)init_turnip_driver, &info) || !info.dli_fname) {
-        ALOGE("dladdr failed");
-        return;
-    }
-    
-    std::string hook_lib_dir = std::string(info.dli_fname).substr(0, std::string(info.dli_fname).find_last_of("/"));
-    
-    std::string pkg_name;
-    std::ifstream cmdline("/proc/self/cmdline");
-    if (!(cmdline >> pkg_name)) {
-        ALOGE("Failed to read cmdline");
-        return;
-    }
-    // Clean null terminator if present
-    pkg_name = pkg_name.c_str(); 
-    
-    std::string base_data_dir = "/data/data/" + pkg_name;
-    std::string cache_parent = base_data_dir + "/cache";
-    std::string cache_dir = cache_parent + "/turnip/";
-    
-    mkdir(cache_parent.c_str(), 0777); 
-    chmod(cache_parent.c_str(), 0777);
-    
-    mkdir(cache_dir.c_str(), 0777);
-    chmod(cache_dir.c_str(), 0777);
-    
-    std::string driver_name = "libvulkan_freedreno.so";
-    std::string src_path = hook_lib_dir + "/libvulkan_freedreno.so";
-    std::string dst_path = cache_dir + driver_name;
-    
-    std::ifstream src(src_path, std::ios::binary);
-    std::ofstream dst(dst_path, std::ios::binary | std::ios::trunc);
-    
-    if (src.is_open() && dst.is_open()) {
-        dst << src.rdbuf();
-        dst.close();
-        src.close();
-        chmod(dst_path.c_str(), 0755);
-        ALOGI("Successfully copied driver to %s", dst_path.c_str());
-    } else {
-        ALOGE("Copy failed! Src: %s (Open: %d), Dst: %s (Open: %d)", 
-              src_path.c_str(), src.is_open(), dst_path.c_str(), dst.is_open());
-        return;
-    }
-    
-    std::string ld_library_path = getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "";
-    ld_library_path = cache_dir + ":" + hook_lib_dir + ":" + ld_library_path;
-    
-    std::string icd_json_path = cache_dir + "libvulkan_freedreno.json";
-    std::string icd_json_content = R"({
-        "file_format_version": "1.0.0",
-        "ICD": {
-            "library_path": ")" + cache_dir + driver_name + R"(",
-            "api_version": "1.3.0"
+// Get native library directory via Context API (like GameNativePerformance)
+static char* get_native_library_dir(JNIEnv* env, jobject context) {
+    char* native_libdir = nullptr;
+
+    if (context != nullptr) {
+        jclass class_ = env->FindClass("android/content/ContextWrapper");
+        if (!class_) return nullptr;
+
+        jmethodID getFilesDir = env->GetMethodID(class_, "getFilesDir", "()Ljava/io/File;");
+        if (!getFilesDir) return nullptr;
+
+        jobject filesDirObj = env->CallObjectMethod(context, getFilesDir);
+        jclass fileClass = env->GetObjectClass(filesDirObj);
+        jmethodID getAbsolutePath = env->GetMethodID(fileClass, "getAbsolutePath", "()Ljava/lang/String;");
+
+        jstring absolutePath = (jstring)env->CallObjectMethod(filesDirObj, getAbsolutePath);
+        if (absolutePath) {
+            const char* path_chars = env->GetStringUTFChars(absolutePath, nullptr);
+            if (path_chars) {
+                native_libdir = strdup(path_chars);
+                env->ReleaseStringUTFChars(absolutePath, path_chars);
+            }
         }
-    })";
 
-    std::ofstream icd_file(icd_json_path);
-    if (icd_file.is_open()) {
-        icd_file << icd_json_content;
-        icd_file.close();
+        env->DeleteLocalRef(class_);
+        env->DeleteLocalRef(filesDirObj);
+        env->DeleteLocalRef(fileClass);
     }
 
-    adrenotools_set_freedreno_env("VK_DRIVER_FILES", icd_json_path.c_str());
-    adrenotools_set_freedreno_env("VK_ICD_FILENAMES", icd_json_path.c_str());
-    adrenotools_set_freedreno_env("MESA_LOADER_DRIVER_OVERRIDE", "turnip");
-    adrenotools_set_freedreno_env("TU_DEBUG", "sysmem,gmem,force_vk_vendor=0x5143");
-    
-    setenv("LD_LIBRARY_PATH", ld_library_path.c_str(), 1);
-    setenv("DISABLE_VULKAN_SWAPCHAIN_LAYER", "1", 1);
-    
-    const char* system_lib_dir = "/system/lib64";
+    return native_libdir;
+}
 
-    std::string tmp_dir = cache_dir + "temp";
-    mkdir(tmp_dir.c_str(), S_IRWXU | S_IRWXG);
-    
+// Get driver path from app's files directory
+static char* get_driver_path(JNIEnv* env, jobject context) {
+    char* driver_path = nullptr;
+
+    if (context != nullptr) {
+        jclass class_ = env->FindClass("android/content/ContextWrapper");
+        if (!class_) return nullptr;
+
+        jmethodID getFilesDir = env->GetMethodID(class_, "getFilesDir", "()Ljava/io/File;");
+        jobject filesDirObj = env->CallObjectMethod(context, getFilesDir);
+        jclass fileClass = env->GetObjectClass(filesDirObj);
+        jmethodID getAbsolutePath = env->GetMethodID(fileClass, "getAbsolutePath", "()Ljava/lang/String;");
+
+        jstring absolutePath = (jstring)env->CallObjectMethod(filesDirObj, getAbsolutePath);
+        if (absolutePath) {
+            const char* path_chars = env->GetStringUTFChars(absolutePath, nullptr);
+            if (path_chars) {
+                if (asprintf(&driver_path, "%s/turnip/", path_chars) == -1)
+                    driver_path = nullptr;
+                env->ReleaseStringUTFChars(absolutePath, path_chars);
+            }
+        }
+
+        env->DeleteLocalRef(class_);
+    }
+
+    return driver_path;
+}
+
+static void init_turnip_driver(JNIEnv* env, jobject context) {
+    ALOGI("Initializing Turnip Driver...");
+
+    char* driver_path = nullptr;
+    char* native_lib_dir = nullptr;
+    char* tmpdir = nullptr;
+
+    // Get paths via Context API (more reliable than /data/data/)
+    driver_path = get_driver_path(env, context);
+    if (!driver_path || access(driver_path, F_OK) != 0) {
+        ALOGE("Driver path not found or inaccessible: %s", driver_path ? driver_path : "NULL");
+        goto cleanup;
+    }
+
+    native_lib_dir = get_native_library_dir(env, context);
+    if (!native_lib_dir) {
+        ALOGE("Failed to get native library directory");
+        goto cleanup;
+    }
+
+    // Create temp directory for adrenotools hooks (CRITICAL)
+    char tmpdir_buffer[512];
+    snprintf(tmpdir_buffer, sizeof(tmpdir_buffer), "%stemp/", driver_path);
+    mkdir(tmpdir_buffer, S_IRWXU | S_IRWXG);
+    chmod(tmpdir_buffer, 0777);
+    tmpdir = tmpdir_buffer;
+
+    ALOGI("Driver path: %s", driver_path);
+    ALOGI("Native lib dir: %s", native_lib_dir);
+    ALOGI("Temp dir: %s", tmpdir);
+
+    // Key: Don't manually set VK_ICD_FILENAMES or VK_DRIVER_FILES
+    // Let adrenotools handle this internally!
+    // Only set these if adrenotools doesn't set them properly:
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "turnip", 1);
+    setenv("TU_DEBUG", "sysmem", 1);
+
+    // Open libvulkan with custom driver
     g_vulkan_handle = adrenotools_open_libvulkan(
-       RTLD_LOCAL | RTLD_NOW,                 // dlopenMode
-       ADRENOTOOLS_DRIVER_CUSTOM, // featureFlags
-       tmp_dir.c_str(),        // tmpLibDir (CRITICAL: needs a writable path for hooks)
-       hook_lib_dir.c_str(),     // hookLibDir
-       cache_dir.c_str(),        // customDriverDir (copied Turnip)
-       driver_name.c_str(),      // customDriverName (libvulkan_freedreno.so)
-       nullptr,                  // fileRedirectDir (not needed usually)
-       nullptr                   // userMappingHandle (not needed usually)
+        RTLD_LOCAL | RTLD_NOW,              // dlopenMode
+        ADRENOTOOLS_DRIVER_CUSTOM,          // featureFlags
+        tmpdir,                             // tmpLibDir (CRITICAL for hooks)
+        native_lib_dir,                     // hookLibDir
+        driver_path,                        // customDriverDir
+        "libvulkan_freedreno.so",           // customDriverName
+        nullptr,                            // fileRedirectDir
+        nullptr                             // userMappingHandle
     );
 
     if (g_vulkan_handle) {
-        ALOGI("✓ Turnip driver loaded for %s", pkg_name.c_str());
+        ALOGI("✓ Turnip driver successfully loaded!");
     } else {
-        ALOGE("✗ adrenotools_open_libvulkan failed for %s", pkg_name.c_str());
+        ALOGE("✗ Failed to load Turnip driver via adrenotools");
     }
+
+cleanup:
+    if (driver_path) free(driver_path);
+    if (native_lib_dir) free(native_lib_dir);
 }
 
-extern "C" jint JNI_OnLoad(JavaVM* vm, void* reserved) {
-    ALOGI("JNI_OnLoad: Initializing Turnip Driver...");
-
-    if (!linkernsbypass_load_status()) {
-        ALOGW("Linker bypass not ready in JNI_OnLoad, attempting anyway...");
+extern "C" JNIEXPORT void JNICALL
+Java_com_yourpackage_TurnipLoader_initTurnipDriver(JNIEnv* env, jclass clazz, jobject context) {
+    if (!context) {
+        ALOGE("Context is null!");
+        return;
     }
+    init_turnip_driver(env, context);
+}
 
-    init_turnip_driver();
-
+extern "C" JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM* vm, void* reserved) {
+    ALOGI("JNI_OnLoad called");
+    g_java_vm = vm;
     return JNI_VERSION_1_6;
 }
