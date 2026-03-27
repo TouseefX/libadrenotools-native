@@ -35,6 +35,8 @@ if(TARGET shadowhook)
         -Wno-declaration-after-statement
         -Wno-error=unsafe-buffer-usage
         -Wno-unsafe-buffer-usage
+		-Wno-error=reserved-identifier
+        -Wno-reserved-identifier
     )
     
     # Force C99 only for ShadowHook's C files
