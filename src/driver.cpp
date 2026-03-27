@@ -386,7 +386,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumeratePhysicalDevices(VkInstan
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     // Added libroblox for Galaxy Store and libUE/libVk for Unreal Engine
-    const char* target_libs = ".*(libroblox|libUnity|libmain|libUE4|libUE5|libvulkan|vulkan|adreno).*\\.so$";
+    const char* target_libs = ".*(libroblox|libvulkan|vulkan|adreno|libmain|libUnity|libUE).*\\.so$";
     char* driver_path = get_driver_path(env, context);
     char* native_lib_dir = get_native_library_dir(env, context);
 
