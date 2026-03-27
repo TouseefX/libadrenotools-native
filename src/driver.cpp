@@ -373,6 +373,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkCreateInstance(const VkInstanceCr
     return func(pCreateInfo, pAllocator, pInstance);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumeratePhysicalDevices(VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices) {
+    if (g_turnip_gipa) {
+        auto func = (PFN_vkEnumeratePhysicalDevices)g_turnip_gipa(instance, "vkEnumeratePhysicalDevices");
+        if (func) return func(instance, pPhysicalDeviceCount, pPhysicalDevices);
+    }
+    return VK_SUCCESS;
+}
+
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     char* driver_path = get_driver_path(env, context);
     char* native_lib_dir = get_native_library_dir(env, context);
@@ -415,11 +423,14 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Turnip loaded, setting up hooks...");
     
-    xhook_register(".*\\.so$", "dlopen", (void*)hooked_dlopen, NULL);
-    xhook_register(".*\\.so$", "vkGetInstanceProcAddr",
-                    (void*)hooked_vkGetInstanceProcAddr, NULL);
-    xhook_register(".*\\.so$", "vkCreateInstance", (void*)hooked_vkCreateInstance, NULL);
-    xhook_register(".*\\.so$", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+    // Added libroblox for Galaxy Store and libUE/libVk for Unreal Engine
+    const char* target_libs = ".*(libroblox|libUnity|libmain|libUE4|libUE5|libVkLayer|librender).*\\.so$";
+    
+    xhook_register(target_libs, "dlopen", (void*)hooked_dlopen, NULL);
+    xhook_register(target_libs, "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    xhook_register(target_libs, "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+    xhook_register(target_libs, "vkCreateInstance", (void*)hooked_vkCreateInstance, NULL);
+    xhook_register(target_libs, "vkEnumeratePhysicalDevices", (void*)hooked_vkEnumeratePhysicalDevices, NULL);
     
     xhook_refresh(1);
 
