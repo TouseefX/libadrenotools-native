@@ -382,6 +382,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumeratePhysicalDevices(VkInstan
 }
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
+    // Added libroblox for Galaxy Store and libUE/libVk for Unreal Engine
+    const char* target_libs = ".*(libroblox|libUnity|libmain|libUE4|libUE5|libVkLayer|librender).*\\.so$";
     char* driver_path = get_driver_path(env, context);
     char* native_lib_dir = get_native_library_dir(env, context);
 
@@ -422,9 +424,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     }
 
     ALOGI("Turnip loaded, setting up hooks...");
-    
-    // Added libroblox for Galaxy Store and libUE/libVk for Unreal Engine
-    const char* target_libs = ".*(libroblox|libUnity|libmain|libUE4|libUE5|libVkLayer|librender).*\\.so$";
     
     xhook_register(target_libs, "dlopen", (void*)hooked_dlopen, NULL);
     xhook_register(target_libs, "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
