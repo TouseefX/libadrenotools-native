@@ -21,6 +21,7 @@ add_library(adrenotools ${LIB_SOURCES})
 
 target_include_directories(adrenotools PUBLIC include)
 target_include_directories(adrenotools PRIVATE .)
+target_include_directories(adrenotools PRIVATE lib/xhook/libxhook/jni)
 target_compile_options(adrenotools PRIVATE -Wall -Wextra)
 target_link_libraries(adrenotools android -Wl,--whole-archive linkernsbypass -Wl,--no-whole-archive xhook log)
 
