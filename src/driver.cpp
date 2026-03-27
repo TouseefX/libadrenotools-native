@@ -330,7 +330,9 @@ static char* get_driver_path(JNIEnv* env, jobject context) {
 }
 
 static void* get_system_vulkan_func(const char* name) {
-    static void* system_vulkan = dlopen("libvulkan.so", RTLD_NOW);
+    static void* system_vulkan = dlopen("/system/lib64/libvulkan.so", RTLD_NOW);
+    if (!system_vulkan) system_vulkan = dlopen("/system/lib/libvulkan.so", RTLD_NOW);
+    
     if (!system_vulkan) return nullptr;
     return dlsym(system_vulkan, name);
 }
@@ -358,18 +360,17 @@ static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, cons
     return sys_gipa ? sys_gipa(instance, pName) : nullptr;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumeratePhysicalDevices(VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices) {
-    auto func = (PFN_vkEnumeratePhysicalDevices)g_turnip_gipa(instance, "vkEnumeratePhysicalDevices");
-    return func(instance, pPhysicalDeviceCount, pPhysicalDevices);
-}
-
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     if (g_turnip_gipa) {
         return g_turnip_gipa((VkInstance)device, pName);
     }
-    
     auto sys_gdpa = (PFN_vkGetDeviceProcAddr)get_system_vulkan_func("vkGetDeviceProcAddr");
     return sys_gdpa ? sys_gdpa(device, pName) : nullptr;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
+    auto func = (PFN_vkCreateInstance)g_turnip_gipa(NULL, "vkCreateInstance");
+    return func(pCreateInfo, pAllocator, pInstance);
 }
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
@@ -414,11 +415,10 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     xhook_register(".*\\.so$", "dlopen", (void*)hooked_dlopen, NULL);
     xhook_register(".*\\.so$", "vkGetInstanceProcAddr",
                     (void*)hooked_vkGetInstanceProcAddr, NULL);
-    xhook_register(".*\\.so$", "vkCreateInstance", (void*)hooked_vkGetInstanceProcAddr(NULL, "vkCreateInstance"), NULL);
-    xhook_register(".*\\.so$", "vkEnumeratePhysicalDevices", (void*)hooked_vkEnumeratePhysicalDevices, NULL);
+    xhook_register(".*\\.so$", "vkCreateInstance", (void*)hooked_vkCreateInstance, NULL);
     xhook_register(".*\\.so$", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
     
-    xhook_refresh(0);
+    xhook_refresh(1);
 
     ALOGI("Turnip hooks installed");
 
