@@ -25,6 +25,10 @@ target_include_directories(adrenotools PRIVATE lib/ShadowHook/shadowhook/src/mai
 target_compile_options(adrenotools PRIVATE -Wall -Wextra)
 target_link_libraries(adrenotools android -Wl,--whole-archive linkernsbypass -Wl,--no-whole-archive shadowhook log)
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(shadowhook PRIVATE -Wno-error=unsafe-buffer-usage -Wno-unsafe-buffer-usage)
+endif()
+
 add_subdirectory(src/hook)
 
 if (${GEN_INSTALL_TARGET})
