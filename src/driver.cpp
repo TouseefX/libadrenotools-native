@@ -269,7 +269,6 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static JavaVM* g_java_vm = nullptr;
-static void *dlopen_stub = nullptr;
 static void *gipa_stub = nullptr;
 static void* gdpa_stub = nullptr;
 
@@ -330,14 +329,6 @@ static char* get_driver_path(JNIEnv* env, jobject context) {
     }
 
     return driver_path;
-}
-
-static void* get_system_vulkan_func(const char* name) {
-    static void* system_vulkan = dlopen("/system/lib64/libvulkan.so", RTLD_NOW);
-    if (!system_vulkan) system_vulkan = dlopen("/system/lib/libvulkan.so", RTLD_NOW);
-    
-    if (!system_vulkan) return nullptr;
-    return dlsym(system_vulkan, name);
 }
 
 // Hooked dlopen — intercept when the game opens libvulkan.so
