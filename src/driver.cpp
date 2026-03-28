@@ -368,12 +368,10 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     char tmpdir[512];
     snprintf(tmpdir, sizeof(tmpdir), "%stemp/", driver_path);
     mkdir(tmpdir, S_IRWXU | S_IRWXG);
-
-    setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
-    setenv("TU_DEBUG", "sysmem,flushall", 1);
+    
+    setenv("TU_DEBUG", "sysmem", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
-    setenv("MESA_GLSL_CACHE_DISABLE", "true", 1);
-    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1);
+    setenv("MESA_DEBUG", "silent", 1); // Prevents Mesa from printing logs that trigger security
     
     // Load Turnip via adrenotools — note RTLD_LOCAL, not GLOBAL
     // and only ADRENOTOOLS_DRIVER_CUSTOM (like Winlator)
