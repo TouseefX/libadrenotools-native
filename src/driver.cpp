@@ -271,7 +271,6 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static JavaVM* g_java_vm = nullptr;
 static void *gipa_stub = nullptr;
 static void* gdpa_stub = nullptr;
-static void* prop_get_stub = nullptr;
 
 // Get native library directory via Context API (like GameNativePerformance)
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
@@ -358,23 +357,6 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     return nullptr;
 }
 
-static int hooked_system_property_get(const char* name, char* value) {
-    if (name && strstr(name, "vendor.mesa")) {
-        if (strstr(name, "debug")) {
-            strcpy(value, "sysmem");
-        } else {
-            strcpy(value, "0");
-        }
-        return strlen(value);
-    }
-    
-    if (prop_get_stub) {
-        typedef int (*prop_get_t)(const char*, char*);
-        return ((prop_get_t)prop_get_stub)(name, value);
-    }
-    return 0;
-}
-
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     char* driver_path = get_driver_path(env, context);
     char* native_lib_dir = get_native_library_dir(env, context);
@@ -423,7 +405,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     // dlopen_stub = shadowhook_hook_sym_name("libdl.so", "dlopen", (void*)hooked_dlopen, NULL);
     gipa_stub = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     gdpa_stub = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
-    prop_get_stub = shadowhook_hook_sym_name("libc.so", "__system_property_get", (void*)hooked_system_property_get, NULL);
     
     if (gipa_stub) {
         ALOGI("ShadowHook: Turnip hooks installed successfully");
