@@ -8,7 +8,6 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/system_properties.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
