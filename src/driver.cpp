@@ -365,6 +365,12 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     char tmpdir[512];
     snprintf(tmpdir, sizeof(tmpdir), "%s/temp/", driver_path); 
     mkdir(tmpdir, S_IRWXU | S_IRWXG);
+
+    char cache_dir[512];
+    snprintf(cache_dir, sizeof(cache_dir), "%sshader_cache/", driver_path);
+    mkdir(cache_dir, S_IRWXU | S_IRWXG);
+
+    setenv("MESA_DISK_CACHE_DIR", cache_dir, 1);
     
     // Load Turnip via adrenotools — note RTLD_LOCAL, not GLOBAL
     // and only ADRENOTOOLS_DRIVER_CUSTOM (like Winlator)
@@ -421,18 +427,17 @@ JNI_OnLoad(JavaVM* vm, void* reserved) {
     ALOGI("JNI_OnLoad called");
     g_java_vm = vm;
 
+    setenv("MESA_GLSL_CACHE_DISABLE", "false", 1);
+    setenv("MESA_DISK_CACHE_SINGLE_FILE", "true", 1);
     setenv("MESA_VK_VERSION_OVERRIDE", "1.3", 1);
     setenv("MESA_VULKAN_ICD_SELECT", "freedreno", 1);
-    setenv("MESA_NO_DRICONF", "1", 1); 
     setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
     setenv("MESA_VK_TRACE", "false", 1);
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "freedreno", 1);
     setenv("MESA_DEBUG", "silent", 1);
-    setenv("MESA_NO_CONFIG", "1", 1);
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
-    setenv("TU_DEBUG", "noconfirm,sysmem", 1);
-    setenv("MESA_DISK_CACHE_DIR", "/dev/null", 1);
+    setenv("TU_DEBUG", "noconfirm,sysmem,noflushall", 1);
     
     shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
     
