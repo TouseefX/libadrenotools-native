@@ -366,7 +366,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     }
 
     char tmpdir[512];
-    snprintf(tmpdir, sizeof(tmpdir), "%stemp/", driver_path);
+    snprintf(tmpdir, sizeof(tmpdir), "%s/temp/", driver_path); 
     mkdir(tmpdir, S_IRWXU | S_IRWXG);
     
     // Load Turnip via adrenotools — note RTLD_LOCAL, not GLOBAL
@@ -424,12 +424,14 @@ JNI_OnLoad(JavaVM* vm, void* reserved) {
     ALOGI("JNI_OnLoad called");
     g_java_vm = vm;
     
+    setenv("MESA_NO_DRICONF", "1", 1); 
+    setenv("MESA_VK_TRACE", "false", 1);
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "freedreno", 1);
     setenv("MESA_DEBUG", "silent", 1);
     setenv("MESA_NO_CONFIG", "1", 1);
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
-    setenv("TU_DEBUG", "noconfirm", 1);
+    setenv("TU_DEBUG", "noconfirm,sysmem", 1);
     setenv("MESA_DISK_CACHE_DIR", "/dev/null", 1);
     
     shadowhook_init(SHADOWHOOK_MODE_UNIQUE, true);
