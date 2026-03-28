@@ -374,11 +374,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     setenv("TU_DEBUG", "sysmem", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
 
-    if (shadowhook_init(SHADOWHOOK_MODE_UNIQUE, true) != 0) {
-         ALOGE("ShadowHook init failed");
-         return;
-    }
-
     // Load Turnip via adrenotools — note RTLD_LOCAL, not GLOBAL
     // and only ADRENOTOOLS_DRIVER_CUSTOM (like Winlator)
     g_turnip_handle = adrenotools_open_libvulkan(
@@ -405,8 +400,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Turnip loaded, setting up hooks...");
     
+    dlopen_stub = shadowhook_hook_sym_name("libdl.so",  "dlopen", (void*)hooked_dlopen, NULL);
     gipa_stub = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    dlopen_stub = shadowhook_hook_sym_name("libdl.so", "dlopen", (void*)hooked_dlopen, NULL);
     
     if (gipa_stub) {
         ALOGI("ShadowHook: Turnip hooks installed successfully");
@@ -432,5 +427,11 @@ extern "C" JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM* vm, void* reserved) {
     ALOGI("JNI_OnLoad called");
     g_java_vm = vm;
+    
+    if (shadowhook_init(SHADOWHOOK_MODE_UNIQUE, true) != 0) {
+         ALOGE("ShadowHook init failed");
+         return;
+    }
+    
     return JNI_VERSION_1_6;
 }
