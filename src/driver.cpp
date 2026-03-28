@@ -369,10 +369,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     snprintf(tmpdir, sizeof(tmpdir), "%stemp/", driver_path);
     mkdir(tmpdir, S_IRWXU | S_IRWXG);
     
-    setenv("TU_DEBUG", "sysmem", 1);
-    setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
-    setenv("MESA_DEBUG", "silent", 1); // Prevents Mesa from printing logs that trigger security
-    
     // Load Turnip via adrenotools — note RTLD_LOCAL, not GLOBAL
     // and only ADRENOTOOLS_DRIVER_CUSTOM (like Winlator)
     g_turnip_handle = adrenotools_open_libvulkan(
@@ -427,6 +423,14 @@ extern "C" JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM* vm, void* reserved) {
     ALOGI("JNI_OnLoad called");
     g_java_vm = vm;
+    
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "freedreno", 1);
+    setenv("MESA_DEBUG", "silent", 1);
+    setenv("MESA_NO_CONFIG", "1", 1);
+    setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
+    setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
+    setenv("TU_DEBUG", "noconfirm", 1);
+    setenv("MESA_DISK_CACHE_DIR", "/dev/null", 1);
     
     shadowhook_init(SHADOWHOOK_MODE_UNIQUE, true);
     
