@@ -330,17 +330,14 @@ static char* get_driver_path(JNIEnv* env, jobject context) {
     return driver_path;
 }
 
-// Hooked dlopen — intercept when the game opens libvulkan.so
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
         auto func = g_turnip_gipa(instance, pName);
         if (func) return func;
     }
     
-    if (gipa_stub) {
-        return ((PFN_vkVoidFunction (*)(VkInstance, const char*))gipa_stub)(instance, pName);
-    }
-    return nullptr;
+    typedef PFN_vkVoidFunction (*orig_t)(VkInstance, const char*);
+    return ((orig_t)gipa_stub)(instance, pName);
 }
 
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
@@ -423,8 +420,11 @@ extern "C" JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM* vm, void* reserved) {
     ALOGI("JNI_OnLoad called");
     g_java_vm = vm;
-    
+
+    setenv("MESA_VK_VERSION_OVERRIDE", "1.3", 1);
+    setenv("MESA_VULKAN_ICD_SELECT", "freedreno", 1);
     setenv("MESA_NO_DRICONF", "1", 1); 
+    setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
     setenv("MESA_VK_TRACE", "false", 1);
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "freedreno", 1);
     setenv("MESA_DEBUG", "silent", 1);
@@ -434,7 +434,7 @@ JNI_OnLoad(JavaVM* vm, void* reserved) {
     setenv("TU_DEBUG", "noconfirm,sysmem", 1);
     setenv("MESA_DISK_CACHE_DIR", "/dev/null", 1);
     
-    shadowhook_init(SHADOWHOOK_MODE_UNIQUE, true);
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
     
     return JNI_VERSION_1_6;
 }
