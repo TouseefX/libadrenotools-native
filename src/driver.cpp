@@ -400,7 +400,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Turnip loaded, setting up hooks...");
     
-    dlopen_stub = shadowhook_hook_sym_name("libdl.so",  "dlopen", (void*)hooked_dlopen, NULL);
+    dlopen_stub = shadowhook_hook_sym_name("libdl.so", "dlopen", (void*)hooked_dlopen, NULL);
     gipa_stub = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     
     if (gipa_stub) {
