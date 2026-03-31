@@ -422,10 +422,10 @@ JNI_OnLoad(JavaVM* vm, void* reserved) {
     setenv("MESA_DEBUG", "silent", 1);
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
-    setenv("TU_DEBUG", "noconfirm,noflushall", 1);
+    setenv("TU_DEBUG", "noconfirm,noflushall,pwr_max", 1); // max performance and let the autotuner do the work
     setenv("TU_DEVELOPER_MODE", "1", 1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-    
+    // opengl settings (opengl support soon)
     setenv("MESA_LOADER_DRIVER_OVERRIDE", "kgsl", 1);
     setenv("GALLIUM_DRIVER", "kgsl", 1);
     setenv("EGL_PLATFORM", "android", 1);
