@@ -37,6 +37,8 @@ Please create an issue if support for anything else is desired.
 
 Recommend [Drivers](https://github.com/nihui/mesa-turnip-android-driver)
 
+And Freedeno Drivers
+
 ### FAQ
 
 #### Is there an example project?
