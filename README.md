@@ -35,7 +35,7 @@ not many apps use vulkan
 
 Please create an issue if support for anything else is desired.
 
-Recommend [Drivers](https://github.com/nihui/mesa-turnip-android-driver)
+Recommend [Drivers](https://github.com/TGMGT/Banners-Turnip)
 
 And Freedeno Drivers
 
