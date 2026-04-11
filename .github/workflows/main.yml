@@ -30,8 +30,7 @@ jobs:
             -Dlinkernsbypass_BUILD_SHARED=ON
           make -j$(nproc)
           mkdir -p libadrenotools
-          shopt -s globstar
-          cp build/**/*.so libadrenotools/
+          find build/ -name "*.so" -exec cp {} libadrenotools/ \;
           
       - name: List files (Diagnostic)
         run: find build -name "*.so"
