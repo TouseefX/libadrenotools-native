@@ -13,7 +13,7 @@ jobs:
       - name: Set up NDK
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r29c
+          ndk-version: r29
           add-to-path: true
 
       - name: Build with CMake
