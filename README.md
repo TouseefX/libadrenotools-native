@@ -27,7 +27,7 @@ Arm64
 
 Vulkan 1.3+
 
-Snapdragon 865+
+Adero 650+
 
 Please create an issue if support for anything else is desired.
 
