@@ -412,6 +412,7 @@ static void global_atomic_init() {
 	setenv("IR3_SHADER_DEBUG", "nopreamble", 1);
 	setenv("ADRENO_TURBO", "1", 1);
 	setenv("KGSL_CONTEXT_PRIORITY", "1", 1);
+    setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
     
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
