@@ -17,7 +17,8 @@ this phone used to be a cry baby when I play jump showdown now its not lol
 
 Tested with Roblox with Turniup MrPurple T24 AXxx S20 Ultra 5G (Vulkan)
 
-what did bro feed this driver its too fast and no overheating prob because Snapdragon 865 is balanced 
+what did bro feed this driver its too fast and no overheating prob because Snapdragon 865 is balanced
+3 hours and no overheating and no performance drop until it got to 15% ofc
 
 ### Adreno Tools 
 A library for applying rootless Adreno GPU driver modifications/replacements. Currently supports loading custom GPU drivers such as [turnip](https://docs.mesa3d.org/android.html#building-using-the-android-ndk),  enabling BCn textures and redirecting file operations to allow accessing shader dumps and modification of the [driver config file](https://gist.github.com/bylaws/04130932e2634d1c6a2a9729e3940d60) without root.
