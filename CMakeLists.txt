@@ -11,13 +11,18 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-vers
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(FORCE_STATIC_PLZ ON)
 
 add_subdirectory(lib/linkernsbypass)
 
 function(add_library name)
-    set(args "${ARGN}")
-    list(REMOVE_ITEM args SHARED)
-    _add_library(${name} STATIC ${args})
+    if(FORCE_STATIC_PLZ AND NOT "${name}" STREQUAL "adrenotools")
+        set(args "${ARGN}")
+        list(REMOVE_ITEM args SHARED)
+        _add_library(${name} STATIC ${args})
+    else()
+        _add_library(${name} ${ARGN})
+    endif()
 endfunction()
 
 add_subdirectory(lib/ShadowHook/shadowhook/src/main/cpp shadowhook_build)
@@ -46,9 +51,7 @@ set(LIB_SOURCES src/bcenabler.cpp
                 include/adrenotools/driver.h
                 include/adrenotools/priv.h)
 
-function(add_library)
-    _add_library(${ARGV})
-endfunction()
+set(FORCE_STATIC_PLZ OFF)
 
 add_library(adrenotools SHARED ${LIB_SOURCES})
 
