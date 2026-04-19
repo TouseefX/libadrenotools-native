@@ -11,17 +11,17 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-vers
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(FORCE_STATIC_PLZ ON)
 
 add_subdirectory(lib/linkernsbypass)
 
-function(add_library name type)
-    if(FORCE_STATIC_PLZ AND NOT "${name}" STREQUAL "adrenotools")
-        set(args "${ARGN}")
+function(add_library name)
+    set(args "${ARGN}")
+	
+    if(NOT "${name}" STREQUAL "adrenotools")
         list(REMOVE_ITEM args SHARED)
-        _add_library(${name} STATIC ${args})
+        cmake_language(CALL _add_library ${name} STATIC ${args})
     else()
-        _add_library(${name} ${ARGN})
+        cmake_language(CALL _add_library ${name} ${ARGN})
     endif()
 endfunction()
 
@@ -50,8 +50,6 @@ set(LIB_SOURCES src/bcenabler.cpp
                 include/adrenotools/bcenabler.h
                 include/adrenotools/driver.h
                 include/adrenotools/priv.h)
-
-set(FORCE_STATIC_PLZ OFF)
 
 add_library(adrenotools SHARED ${LIB_SOURCES})
 
