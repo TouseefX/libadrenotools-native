@@ -279,6 +279,17 @@ static void* hooked_android_dlopen_ext(
 {
     BYTEHOOK_STACK_SCOPE();
 	
+    void* caller = __builtin_return_address(0);
+    Dl_info caller_info{};
+    if (dladdr(caller, &caller_info) && caller_info.dli_fname) {
+        if (strstr(caller_info.dli_fname, "libhook_impl") ||
+            strstr(caller_info.dli_fname, "libadrenotools") ||
+            strstr(caller_info.dli_fname, "linker64") ||
+            strstr(caller_info.dli_fname, "libnativeloader")) {
+            return real_android_dlopen_ext(filename, flags, extinfo);
+        }
+    }
+	
     if (extinfo && (extinfo->flags & ANDROID_DLEXT_USE_NAMESPACE)) {
         return real_android_dlopen_ext(filename, flags, extinfo);
     }
@@ -294,6 +305,15 @@ static void* hooked_android_dlopen_ext(
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
 
+    void* caller = __builtin_return_address(0);
+    Dl_info caller_info{};
+    if (dladdr(caller, &caller_info) && caller_info.dli_fname) {
+        if (strstr(caller_info.dli_fname, "libhook_impl") ||
+            strstr(caller_info.dli_fname, "libadrenotools")) {
+            return real_dlopen(filename, flags);
+        }
+    }
+
     if (filename && strstr(filename, "libvulkan.so") && g_turnip_handle) {
         ALOGI("dlopen intercepted: %s → Turnip", filename);
         return g_turnip_handle;
@@ -301,6 +321,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
 
     return real_dlopen(filename, flags);
 }
+
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
         auto func = g_turnip_gipa(instance, pName);
