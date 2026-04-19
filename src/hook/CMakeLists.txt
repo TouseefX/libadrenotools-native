@@ -1,4 +1,4 @@
-add_library(hook_impl SHARED hook_impl.cpp hook_impl.h hook_impl_params.h)
+add_library(hook_impl STATIC hook_impl.cpp hook_impl.h hook_impl_params.h)
 
 target_compile_options(hook_impl PRIVATE -Wall -Wextra)
 target_link_libraries(hook_impl linkernsbypass log)
