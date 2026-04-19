@@ -11,8 +11,6 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-vers
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(BYTEHOOK_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(SHADOWHOOK_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(lib/linkernsbypass)
 add_subdirectory(lib/ShadowHook/shadowhook/src/main/cpp shadowhook_build)
@@ -34,6 +32,14 @@ FetchContent_Declare(
   SOURCE_SUBDIR  bytehook/src/main/cpp
 )
 FetchContent_MakeAvailable(bytehook)
+
+if(TARGET shadowhook)
+    set_target_properties(shadowhook PROPERTIES TYPE STATIC)
+endif()
+
+if(TARGET bytehook)
+    set_target_properties(bytehook PROPERTIES TYPE STATIC)
+endif()
 
 set(LIB_SOURCES src/bcenabler.cpp
                 src/driver.cpp
