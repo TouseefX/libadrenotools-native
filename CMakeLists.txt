@@ -33,9 +33,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(bytehook)
 
-target_compile_definitions(shadowhook PRIVATE JNI_OnLoad=shadowhook_JNI_OnLoad)
-target_compile_definitions(bytehook PRIVATE JNI_OnLoad=bytehook_JNI_OnLoad)
-
 set(LIB_SOURCES src/bcenabler.cpp
                 src/driver.cpp
                 include/adrenotools/bcenabler.h
