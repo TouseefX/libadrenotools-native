@@ -9,7 +9,8 @@ project(adrenotools LANGUAGES CXX C)
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version")
 
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
-set(BUILD_SHARED_LIBS OFF)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Force all libraries to be static" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(lib/linkernsbypass)
 add_subdirectory(lib/ShadowHook/shadowhook/src/main/cpp shadowhook_build)
