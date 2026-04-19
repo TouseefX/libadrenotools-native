@@ -43,6 +43,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(bytehook)
 
+target_compile_definitions(shadowhook PRIVATE JNI_OnLoad=shadowhook_JNI_OnLoad)
+target_compile_definitions(bytehook PRIVATE JNI_OnLoad=bytehook_JNI_OnLoad)
+
 set(LIB_SOURCES src/bcenabler.cpp
                 src/driver.cpp
                 include/adrenotools/bcenabler.h
@@ -61,6 +64,7 @@ target_compile_options(adrenotools PRIVATE -Wall -Wextra)
 target_link_libraries(adrenotools 
     android 
     vulkan
+	-Wl,--allow-multiple-definition
     -Wl,--whole-archive 
         linkernsbypass 
         shadowhook 
