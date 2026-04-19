@@ -292,7 +292,6 @@ static void* hooked_android_dlopen_ext(
     }
 
     if (filename && strstr(filename, "libvulkan.so") && g_turnip_handle) {
-        ALOGI("android_dlopen_ext intercepted: %s → Turnip", filename);
         return g_turnip_handle;
     }
 
@@ -312,7 +311,6 @@ static void* hooked_dlopen(const char* filename, int flags) {
     }
 
     if (filename && strstr(filename, "libvulkan.so") && g_turnip_handle) {
-        ALOGI("dlopen intercepted: %s → Turnip", filename);
         return g_turnip_handle;
     }
 
