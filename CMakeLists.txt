@@ -14,11 +14,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(lib/linkernsbypass)
 
-macro(add_library name)
-  set(args "${ARGN}")
-  list(REMOVE_ITEM args SHARED)
-  _add_library(${name} STATIC ${args})
-endmacro()
+function(add_library name)
+    set(args "${ARGN}")
+    list(REMOVE_ITEM args SHARED)
+    _add_library(${name} STATIC ${args})
+endfunction()
 
 add_subdirectory(lib/ShadowHook/shadowhook/src/main/cpp shadowhook_build)
 
@@ -46,9 +46,9 @@ set(LIB_SOURCES src/bcenabler.cpp
                 include/adrenotools/driver.h
                 include/adrenotools/priv.h)
 
-macro(add_library)
+function(add_library)
     _add_library(${ARGV})
-endmacro()
+endfunction()
 
 add_library(adrenotools SHARED ${LIB_SOURCES})
 
