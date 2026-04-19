@@ -272,40 +272,36 @@ static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
 static void* (*real_android_dlopen_ext)(const char*, int, const android_dlextinfo*) = nullptr;
-static thread_local bool hook_guard = false;
+static thread_local bool g_manual_lock = false;
 
 static void* hooked_android_dlopen_ext(
     const char* filename, int flags,
     const android_dlextinfo* extinfo)
 {
-    if (hook_guard) return real_android_dlopen_ext(filename, flags, extinfo);
+    if (g_manual_lock) return real_android_dlopen_ext(filename, flags, extinfo);
+    
+    g_manual_lock = true;
 	
-    hook_guard = true;
-
-    BYTEHOOK_STACK_SCOPE();
-
     void* caller = BYTEHOOK_RETURN_ADDRESS();
     Dl_info info{};
-	
     if (dladdr(caller, &info) && info.dli_fname) {
         if (strstr(info.dli_fname, "libhook_impl") ||
             strstr(info.dli_fname, "libadrenotools") ||
-            strstr(info.dli_fname, "libc.so") || 
-            strstr(info.dli_fname, "liblog.so") ||
-            strstr(info.dli_fname, "linker")) {
+            strstr(info.dli_fname, "linker") ||
+            strstr(info.dli_fname, "libc.so")) {
             
-            hook_guard = false;
+            g_manual_lock = false;
             return real_android_dlopen_ext(filename, flags, extinfo);
         }
     }
 	
     if (filename && strstr(filename, "libvulkan.so") && g_turnip_handle) {
-        hook_guard = false; 
+        g_manual_lock = false; 
         return g_turnip_handle;
     }
 	
     void* res = real_android_dlopen_ext(filename, flags, extinfo);
-    hook_guard = false; 
+    g_manual_lock = false; 
     return res;
 }
 
