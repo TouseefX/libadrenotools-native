@@ -273,8 +273,12 @@ static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
 static void* (*real_android_dlopen_ext)(const char*, int, const android_dlextinfo*) = nullptr;
 
+static void* (*real_dlopen)(const char*, int) = nullptr;
+static void* (*real_android_dlopen_ext)(const char*, int, 
+    const android_dlextinfo*) = nullptr;
+
 static void* hooked_dlopen(const char* filename, int flags) {
-    BYTEHOOK_STACK_SCOPE(); // RAII cleanup, always first line
+    BYTEHOOK_STACK_SCOPE();
 
     if (filename && strstr(filename, "libvulkan.so")) {
         if (g_turnip_handle) {
@@ -283,8 +287,8 @@ static void* hooked_dlopen(const char* filename, int flags) {
         }
     }
 
-    // Call original via macro instead of real_dlopen pointer
-    return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+    // Use saved real pointer instead of BYTEHOOK_CALL_PREV
+    return real_dlopen(filename, flags);
 }
 
 static void* hooked_android_dlopen_ext(
@@ -300,9 +304,9 @@ static void* hooked_android_dlopen_ext(
         }
     }
 
-    return BYTEHOOK_CALL_PREV(hooked_android_dlopen_ext, filename, flags, extinfo);
+    // Use saved real pointer instead of BYTEHOOK_CALL_PREV
+    return real_android_dlopen_ext(filename, flags, extinfo);
 }
-
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
         auto func = g_turnip_gipa(instance, pName);
@@ -500,6 +504,11 @@ static void global_atomic_init() {
     setenv("gfx-enable-gfx-jobs", "1", 1);
 
 	applyTurnipOptimizations();
+
+	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(
+        dlsym(RTLD_DEFAULT, "dlopen"));
+    real_android_dlopen_ext = reinterpret_cast<decltype(real_android_dlopen_ext)>(
+        dlsym(RTLD_DEFAULT, "android_dlopen_ext"));
 
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
     bytehook_init(BYTEHOOK_MODE_MANUAL, false);
