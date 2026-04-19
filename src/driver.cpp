@@ -273,10 +273,6 @@ static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
 static void* (*real_android_dlopen_ext)(const char*, int, const android_dlextinfo*) = nullptr;
 
-static void* (*real_dlopen)(const char*, int) = nullptr;
-static void* (*real_android_dlopen_ext)(const char*, int, 
-    const android_dlextinfo*) = nullptr;
-
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
 
