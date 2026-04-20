@@ -528,12 +528,12 @@ static void global_atomic_init() {
 	applyTurnipOptimizations();
 
 	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(
-        dlsym(RTLD_DEFAULT, "dlopen"));
+        dlsym(RTLD_NEXT, "dlopen"));
     real_android_dlopen_ext = reinterpret_cast<decltype(real_android_dlopen_ext)>(
-        dlsym(RTLD_DEFAULT, "android_dlopen_ext"));
+        dlsym(RRTLD_NEXT, "android_dlopen_ext"));
 
-    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-    bytehook_init(BYTEHOOK_MODE_MANUAL, false);
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
+    bytehook_init(BYTEHOOK_MODE_MANUAL, true);
 }
 
 void perform_init(JavaVM* vm) {
