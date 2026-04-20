@@ -487,7 +487,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
 	setpriority(PRIO_PROCESS, 0, -20);
 
-	ALOGI("Turnip loaded, hooks loaded...")
+	ALOGI("Turnip loaded, hooks loaded...");
 	g_allow_hooks = true;
 
     if (gipa_stub)
