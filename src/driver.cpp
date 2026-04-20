@@ -113,7 +113,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
 	
     init_hook_param(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
 	
-    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
+    return linkernsbypass_namespace_dlopen("/system/lib64/libvulkan.so", dlopenFlags, hookNs);
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
