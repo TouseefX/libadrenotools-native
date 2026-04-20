@@ -477,10 +477,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         goto cleanup;
     }
 
-    ALOGI("Turnip loaded, setting up hooks...");
-
-	g_allow_hooks = true;
-
 	bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
     bytehook_hook_all(NULL, "android_dlopen_ext", (void*)hooked_android_dlopen_ext, NULL, NULL);
 
@@ -490,6 +486,9 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	adrenotools_set_turbo(true);
 
 	setpriority(PRIO_PROCESS, 0, -20);
+
+	ALOGI("Turnip loaded, hooks loaded...")
+	g_allow_hooks = true;
 
     if (gipa_stub)
         ALOGI("ShadowHook: Turnip hooks installed successfully");
