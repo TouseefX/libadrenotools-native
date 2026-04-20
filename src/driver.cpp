@@ -42,8 +42,6 @@
 static PFN_vkGetInstanceProcAddr gipa_stub = nullptr;
 static PFN_vkGetDeviceProcAddr   gdpa_stub = nullptr;
 
-extern "C" void init_hook_param(const void *params);
-
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
@@ -52,7 +50,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
 
     if (android_get_device_api_level() >= 29 && !tmpLibDir)
         tmpLibDir = nullptr;
-	
+
     if (!(featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && fileRedirectDir) {
          ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT present but no file redirect folder found\n");
         return nullptr;
@@ -93,13 +91,25 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
             return nullptr;
         }
     }
-	
+
     auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
 
     if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs)) {
         return nullptr;
     }
-	
+
+    auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, hookNs)};
+    if (!hookImpl) {
+        ALOGE("FAILURE: Couldn't preload the hook implementation\n");
+        return nullptr;
+    }
+
+    auto initHookParam{reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"))};
+    if (!initHookParam) {
+        ALOGE("FAILURE: Couldn't init hook params\n");
+        return nullptr;
+    }
+
     auto importMapping{[&]() -> adrenotools_gpu_mapping * {
         if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
             adrenotools_gpu_mapping *mapping{new adrenotools_gpu_mapping{}};
@@ -110,10 +120,15 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
             return nullptr;
         }
     }()};
-	
-    init_hook_param(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
-	
-    return linkernsbypass_namespace_dlopen("/system/lib64/libvulkan.so", dlopenFlags, hookNs);
+
+    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
+
+    if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs)) {
+        ALOGE("FAILURE: Failed to load libvulkan into the isolated namespace\n");
+        return nullptr;
+    }
+
+    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
@@ -263,27 +278,25 @@ static void* hooked_android_dlopen_ext(
     const android_dlextinfo* extinfo)
 {
     BYTEHOOK_STACK_SCOPE();
-	
-    if (filename != nullptr) {
-        if (strncmp(filename, "/proc/", 6) == 0 || 
-            strstr(filename, "libhook_impl") || 
-            strstr(filename, "libadrenotools")) {
+
+    // Safe caller check using bytehook's own macro
+    Dl_info info{};
+    void* caller = BYTEHOOK_RETURN_ADDRESS();
+    if (dladdr(caller, &info) && info.dli_fname) {
+        if (strstr(info.dli_fname, "libhook_impl") ||
+            strstr(info.dli_fname, "libadrenotools") ||
+            strstr(info.dli_fname, "libnativeloader") ||
+            strstr(info.dli_fname, "linker64")) {
             return real_android_dlopen_ext(filename, flags, extinfo);
         }
     }
-	
-    static thread_local bool is_inside = false;
-    if (is_inside) return real_android_dlopen_ext(filename, flags, extinfo);
-	
-    if (filename != nullptr && strstr(filename, "libvulkan.so") && g_turnip_handle) {
+
+    if (filename && strstr(filename, "libvulkan.so") && g_turnip_handle) {
+        ALOGI("android_dlopen_ext intercepted: %s → Turnip", filename);
         return g_turnip_handle;
     }
 
-    is_inside = true;
-    void* res = real_android_dlopen_ext(filename, flags, extinfo);
-    is_inside = false;
-    
-    return res;
+    return real_android_dlopen_ext(filename, flags, extinfo);
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
@@ -299,6 +312,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
     }
 
     if (filename && strstr(filename, "libvulkan.so") && g_turnip_handle) {
+        ALOGI("dlopen intercepted: %s → Turnip", filename);
         return g_turnip_handle;
     }
 
@@ -436,7 +450,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         NULL,
         NULL
     );
-	
+
     if (!g_turnip_handle) {
         ALOGE("Failed to load Turnip via adrenotools");
         goto cleanup;
@@ -454,6 +468,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         goto cleanup;
     }
 
+    ALOGI("Turnip loaded, setting up hooks...");
+
 	bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
     bytehook_hook_all(NULL, "android_dlopen_ext", (void*)hooked_android_dlopen_ext, NULL, NULL);
 
@@ -463,8 +479,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	adrenotools_set_turbo(true);
 
 	setpriority(PRIO_PROCESS, 0, -20);
-
-	ALOGI("Turnip loaded, hooks loaded...");
 
     if (gipa_stub)
         ALOGI("ShadowHook: Turnip hooks installed successfully");
@@ -504,12 +518,12 @@ static void global_atomic_init() {
 	applyTurnipOptimizations();
 
 	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(
-        dlsym(RTLD_NEXT, "dlopen"));
+        dlsym(RTLD_DEFAULT, "dlopen"));
     real_android_dlopen_ext = reinterpret_cast<decltype(real_android_dlopen_ext)>(
-        dlsym(RTLD_NEXT, "android_dlopen_ext"));
+        dlsym(RTLD_DEFAULT, "android_dlopen_ext"));
 
-    shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
-    bytehook_init(BYTEHOOK_MODE_MANUAL, true);
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+    bytehook_init(BYTEHOOK_MODE_MANUAL, false);
 }
 
 void perform_init(JavaVM* vm) {

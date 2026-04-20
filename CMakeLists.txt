@@ -9,8 +9,6 @@ project(adrenotools LANGUAGES CXX C)
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version")
 
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(lib/linkernsbypass)
 add_subdirectory(lib/ShadowHook/shadowhook/src/main/cpp shadowhook_build)
@@ -39,7 +37,7 @@ set(LIB_SOURCES src/bcenabler.cpp
                 include/adrenotools/driver.h
                 include/adrenotools/priv.h)
 
-add_library(adrenotools SHARED ${LIB_SOURCES})
+add_library(adrenotools ${LIB_SOURCES})
 
 target_include_directories(adrenotools PUBLIC include)
 target_include_directories(adrenotools PRIVATE .)
@@ -48,13 +46,7 @@ target_include_directories(adrenotools PRIVATE
     ${bytehook_SOURCE_DIR}/bytehook/src/main/cpp/include
 )
 target_compile_options(adrenotools PRIVATE -Wall -Wextra)
-target_link_libraries(adrenotools 
-    android 
-    vulkan
-	-Wl,--allow-multiple-definition
-    -Wl,--whole-archive linkernsbypass main_hook hook_impl file_redirect_hook gsl_alloc_hook
-    -Wl,--no-whole-archive shadowhook bytehook
-)
+target_link_libraries(adrenotools android -Wl,--whole-archive linkernsbypass -Wl,--no-whole-archive shadowhook bytehook vulkan)
 
 set_target_properties(adrenotools PROPERTIES
     CXX_STANDARD 17
