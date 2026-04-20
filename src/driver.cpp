@@ -273,7 +273,7 @@ static void* hooked_android_dlopen_ext(
     }
 	
     static thread_local bool is_inside = false;
-    if (is_inside || !g_allow_hooks) return real_android_dlopen_ext(filename, flags, extinfo);
+    if (is_inside) return real_android_dlopen_ext(filename, flags, extinfo);
 	
     if (filename != nullptr && strstr(filename, "libvulkan.so") && g_turnip_handle) {
         return g_turnip_handle;
