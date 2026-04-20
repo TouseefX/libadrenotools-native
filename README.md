@@ -60,6 +60,4 @@ See previous question. It's up to the game developer to add support & use this l
 
 You could contact them to so they add support for it; but that's out of our power.
 
-i don't know, if im allowed to put a patching guide here, but you can also do it on android without root
-
-but most games use opengl es but unitly games do have vulkan but not used you can just use Google ANGLE I do not recommend using Zink for this
+just start the libary by adding a code to the application class On Created or attach contex base part
