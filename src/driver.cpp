@@ -441,7 +441,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     setenv("MESA_DISK_CACHE_DIR", cache_dir, 1);
 
     g_turnip_handle = adrenotools_open_libvulkan(
-        RTLD_LOCAL | RTLD_NOW,
+        RTLD_GLOBAL | RTLD_NOW,
         ADRENOTOOLS_DRIVER_CUSTOM,
         tmpdir,
         native_lib_dir,
