@@ -512,7 +512,7 @@ static void global_atomic_init() {
     
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_DEBUG", "silent", 1);
-	setenv("vblank_mode", "0", 1);
+	// setenv("vblank_mode", "0", 1);
     
     setenv("UNITY_FORCE_VULKAN", "1", 1);
     setenv("UNITY_VULKAN_FORCE_DEVICE_INDEX", "0", 1);
