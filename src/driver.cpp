@@ -480,9 +480,9 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 
-	adrenotools_set_turbo(true);
+	// adrenotools_set_turbo(true);
 
-	setpriority(PRIO_PROCESS, 0, -20);
+	// setpriority(PRIO_PROCESS, 0, -20);
 
     if (gipa_stub)
         ALOGI("ShadowHook: Turnip hooks installed successfully");
@@ -507,7 +507,7 @@ static void global_atomic_init() {
 	setenv("MESA_GLSL_CACHE_DISABLE", "false", 1);
     setenv("MESA_GLSL_CACHE_MAX_SIZE", "512M", 1);
 	setenv("MESA_VK_CACHE_CONTROL", "1", 1);
-	setenv("ADRENO_TURBO", "1", 1);
+	// setenv("ADRENO_TURBO", "1", 1);
 	setenv("KGSL_CONTEXT_PRIORITY", "1", 1);
     setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
     
