@@ -6,7 +6,7 @@ Credits To gamenative performance/WinNative source code for loading and some fix
 
 Credits To MrPurple for env loader
 
-Screenshot of turniup and ite changing how UIs works btw
+Screenshot of turniup and its changing how UIs works btw
 
 Turniup: https://snipboard.io/p67EwR.jpg
 
