@@ -6,6 +6,15 @@ endif()
 
 project(adrenotools LANGUAGES CXX C)
 
+option(OVERCLOCK_BUILD "Enable aggressive performance flags" OFF)
+
+if(OVERCLOCK_BUILD)
+    add_definitions(-OVERCLOCK)
+    message(STATUS "Build: Aggressive Overclock Enabled (Heat Warning!)")
+else()
+    message(STATUS "Build: Stable Standard Mode")
+endif()
+
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version")
 
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
