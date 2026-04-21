@@ -22,7 +22,7 @@ API is documented in the `include/adrenotools` headers.
 Android 12+
 Arm64
 
-Vulkan 1.3+
+Vulkan 1.3+ and driver must match your vulkan verison unless you're in the newer Android (14-16)
 
 Adero 650+
 
