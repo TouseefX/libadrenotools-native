@@ -276,18 +276,40 @@ static void* (*dlopen_stub)(const char*, int) = nullptr;
 static void* (*dlopen_ext_stub)(const char*, int, const android_dlextinfo*) = nullptr;
 static thread_local bool g_in_adrenotools_load = true;
 
+static bool is_vulkan_request(const char* filename) {
+    if (!filename) return false;
+	
+    if (strcmp(filename, "libvulkan.so") == 0) return true;
+	
+    const char* base = strrchr(filename, '/');
+    if (base && strcmp(base + 1, "libvulkan.so") == 0) return true;
+	
+    if (strstr(filename, "/lib/") && strstr(filename, "vulkan") &&
+        (strlen(filename) > 3 &&
+         strcmp(filename + strlen(filename) - 3, ".so") == 0))
+        return true;
+
+    return false;
+}
+
 static void* hooked_android_dlopen_ext(
     const char* filename, int flags, const android_dlextinfo* extinfo)
 {
     if (g_in_adrenotools_load)
         return dlopen_ext_stub(filename, flags, extinfo);
 
-    if (filename && g_turnip_handle &&
-        (strstr(filename, "libvulkan.so") ||
-         strstr(filename, "vulkan.") ||
-         strstr(filename, "/vulkan/"))) {
+    if (!filename || !g_turnip_handle)
+        return dlopen_ext_stub(filename, flags, extinfo);
 
-        ALOGI("android_dlopen_ext(\"%s\") → Turnip handle", filename);
+    if (strstr(filename, ".oat")  || strstr(filename, ".odex") ||
+        strstr(filename, ".vdex") || strstr(filename, "/oat/")  ||
+        strstr(filename, ".dex")  || strstr(filename, ".apk")   ||
+        strstr(filename, ".jar")) {
+        return dlopen_ext_stub(filename, flags, extinfo);
+    }
+
+    if (is_vulkan_request(filename)) {
+        ALOGI("android_dlopen_ext(\"%s\") → Turnip", filename);
         return g_turnip_handle;
     }
 
@@ -297,13 +319,19 @@ static void* hooked_android_dlopen_ext(
 static void* hooked_dlopen(const char* filename, int flags) {
     if (g_in_adrenotools_load)
         return dlopen_stub(filename, flags);
+	
+    if (!filename || !g_turnip_handle)
+        return dlopen_stub(filename, flags);
+	
+    if (strstr(filename, ".oat")  || strstr(filename, ".odex") ||
+        strstr(filename, ".vdex") || strstr(filename, "/oat/")  ||
+        strstr(filename, ".dex")  || strstr(filename, ".apk")   ||
+        strstr(filename, ".jar")) {
+        return dlopen_stub(filename, flags);
+    }
 
-    if (filename && g_turnip_handle &&
-        (strstr(filename, "libvulkan.so") ||
-         strstr(filename, "vulkan.") ||
-         strstr(filename, "/vulkan/"))) {
-
-        ALOGI("dlopen(\"%s\") → Turnip handle", filename);
+    if (is_vulkan_request(filename)) {
+        ALOGI("dlopen(\"%s\") → Turnip", filename);
         return g_turnip_handle;
     }
 
