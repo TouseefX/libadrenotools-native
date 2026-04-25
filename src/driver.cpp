@@ -483,8 +483,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
     bytehook_hook_all(NULL, "android_dlopen_ext", (void*)hooked_android_dlopen_ext, NULL, NULL);
 
-    gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+    // gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    // gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
@@ -495,10 +495,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	    adrenotools_set_turbo(false);
 	#endif
 
-    if (gipa_stub)
-        ALOGI("ShadowHook: Turnip hooks installed successfully");
-    else
-        ALOGE("ShadowHook: Failed to install one or more hooks");
+    ALOGI("Turnip hooks installed successfully");
 
 cleanup:
     env->ReleaseStringUTFChars(jPath, base_cache_path);
@@ -551,7 +548,7 @@ static void global_atomic_init() {
     real_android_dlopen_ext = reinterpret_cast<decltype(real_android_dlopen_ext)>(
         dlsym(RTLD_DEFAULT, "android_dlopen_ext"));
 
-    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+    // shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
     bytehook_init(BYTEHOOK_MODE_MANUAL, false);
 }
 
