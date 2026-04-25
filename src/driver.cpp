@@ -413,8 +413,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         goto cleanup;
     }
 
-	g_in_adrenotools_load = false;
-
     g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
     if (!g_turnip_gipa) {
         ALOGE("Failed to get vkGetInstanceProcAddr from Turnip");
