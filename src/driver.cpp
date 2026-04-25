@@ -270,73 +270,6 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
-static void* (*real_dlopen)(const char*, int) = nullptr;
-static void* (*real_android_dlopen_ext)(const char*, int, const android_dlextinfo*) = nullptr;
-static void* (*dlopen_stub)(const char*, int) = nullptr;
-static void* (*dlopen_ext_stub)(const char*, int, const android_dlextinfo*) = nullptr;
-static thread_local bool g_in_adrenotools_load = true;
-
-static bool is_vulkan_request(const char* filename) {
-    if (!filename) return false;
-	
-    if (strcmp(filename, "libvulkan.so") == 0) return true;
-	
-    const char* base = strrchr(filename, '/');
-    if (base && strcmp(base + 1, "libvulkan.so") == 0) return true;
-	
-    if (strstr(filename, "/lib/") && strstr(filename, "vulkan") &&
-        (strlen(filename) > 3 &&
-         strcmp(filename + strlen(filename) - 3, ".so") == 0))
-        return true;
-
-    return false;
-}
-
-static void* hooked_android_dlopen_ext(
-    const char* filename, int flags, const android_dlextinfo* extinfo)
-{
-    if (g_in_adrenotools_load)
-        return dlopen_ext_stub(filename, flags, extinfo);
-
-    if (!filename || !g_turnip_handle)
-        return dlopen_ext_stub(filename, flags, extinfo);
-
-    if (strstr(filename, ".oat")  || strstr(filename, ".odex") ||
-        strstr(filename, ".vdex") || strstr(filename, "/oat/")  ||
-        strstr(filename, ".dex")  || strstr(filename, ".apk")   ||
-        strstr(filename, ".jar")) {
-        return dlopen_ext_stub(filename, flags, extinfo);
-    }
-
-    if (is_vulkan_request(filename)) {
-        ALOGI("android_dlopen_ext(\"%s\") → Turnip", filename);
-        return g_turnip_handle;
-    }
-
-    return dlopen_ext_stub(filename, flags, extinfo);
-}
-
-static void* hooked_dlopen(const char* filename, int flags) {
-    if (g_in_adrenotools_load)
-        return dlopen_stub(filename, flags);
-	
-    if (!filename || !g_turnip_handle)
-        return dlopen_stub(filename, flags);
-	
-    if (strstr(filename, ".oat")  || strstr(filename, ".odex") ||
-        strstr(filename, ".vdex") || strstr(filename, "/oat/")  ||
-        strstr(filename, ".dex")  || strstr(filename, ".apk")   ||
-        strstr(filename, ".jar")) {
-        return dlopen_stub(filename, flags);
-    }
-
-    if (is_vulkan_request(filename)) {
-        ALOGI("dlopen(\"%s\") → Turnip", filename);
-        return g_turnip_handle;
-    }
-
-    return dlopen_stub(filename, flags);
-}
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -496,12 +429,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Turnip loaded, setting up hooks...");
 
-    // gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    // gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
-
-	dlopen_stub = (decltype(dlopen_stub))shadowhook_hook_sym_name("libdl.so", "dlopen",(void*)hooked_dlopen, nullptr);
-    dlopen_ext_stub = (decltype(dlopen_ext_stub))shadowhook_hook_sym_name("libdl.so", "android_dlopen_ext",(void*)hooked_android_dlopen_ext, nullptr);
-    shadowhook_hook_sym_name("libc.so", "dlopen",(void*)hooked_dlopen, nullptr);
+    gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
