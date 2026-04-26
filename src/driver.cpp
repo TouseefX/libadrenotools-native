@@ -42,93 +42,112 @@
 static PFN_vkGetInstanceProcAddr gipa_stub = nullptr;
 static PFN_vkGetDeviceProcAddr   gdpa_stub = nullptr;
 
+
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
-    if (!linkernsbypass_load_status()) {
-        ALOGE("FAILURE: Could not load linkernsbypass\n");
+    if (android_get_device_api_level() < 30) {
+        ALOGE("FAILURE: adrenotools requires API 31+\n");
+        return nullptr;
+    }
+	
+    if ((featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && !fileRedirectDir) {
+        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT set but no fileRedirectDir\n");
         return nullptr;
     }
 
-    if (android_get_device_api_level() >= 29 && !tmpLibDir)
-        tmpLibDir = nullptr;
-
-    if (!(featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && fileRedirectDir) {
-         ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT present but no file redirect folder found\n");
+    if ((featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && (!customDriverDir || !customDriverName)) {
+        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM set but no driver name or dir\n");
         return nullptr;
     }
 
-    if (!(featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && (customDriverDir || customDriverName)) {
-        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder found\n");
-        return nullptr;
-    }
-
-    if (!(featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) && userMappingHandle) {
-        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT present but no user mapping handle found\n");
+    if ((featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) && !userMappingHandle) {
+        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT set but no userMappingHandle\n");
         return nullptr;
     }
 
     struct stat buf{};
 
     if (featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
-        if (!customDriverName || !customDriverDir) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder parameter was specified\n");
-            return nullptr;
-        }
-
         if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist\n");
+            ALOGE("FAILURE: Custom driver doesn't exist at specified path\n");
             return nullptr;
         }
     }
 
     if (featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
-        if (!fileRedirectDir) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but no folder parameter was found\n");
-            return nullptr;
-        }
-
         if (stat(fileRedirectDir, &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but specified redirect folder doesn't exist\n");
+            ALOGE("FAILURE: Redirect dir doesn't exist\n");
             return nullptr;
         }
     }
+	
+    std::string permittedPaths = std::string(hookLibDir)
+        + ":/system/lib64:/system/lib64/hw"
+        + ":/vendor/lib64:/vendor/lib64/hw"
+        + ":/system/product/lib64";
 
-    auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
+    if ((featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && customDriverDir)
+        permittedPaths += std::string(":") + customDriverDir;
+	
+    auto hookNs = android_create_namespace(
+        "adrenotools-libvulkan",
+        hookLibDir,                          // ld_library_path
+        nullptr,                             // default_library_path
+        ANDROID_NAMESPACE_TYPE_SHARED_ISOLATED,
+        permittedPaths.c_str(),              // permitted paths
+        nullptr                              // parent (default NS)
+    );
 
-    if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs)) {
+    if (!hookNs) {
+        ALOGE("FAILURE: Failed to create SHARED_ISOLATED namespace\n");
         return nullptr;
     }
+	
+    android_link_namespaces(hookNs, nullptr,
+        "libdl.so:libc.so:libm.so:liblog.so:"
+        "libEGL.so:libGLESv2.so:libGLESv1_CM.so:"
+        "libnativewindow.so:libsync.so:libvndksupport.so:"
+        "android.hardware.graphics.mapper@4.0.so"
+    );
+	
+    android_dlextinfo extinfo{};
+    extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    extinfo.library_namespace = hookNs;
 
-    auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, hookNs)};
+    auto hookImpl = android_dlopen_ext("libhook_impl.so", RTLD_NOW, &extinfo);
     if (!hookImpl) {
-        ALOGE("FAILURE: Couldn't preload the hook implementation\n");
+        ALOGE("FAILURE: Couldn't load libhook_impl.so — %s\n", dlerror());
         return nullptr;
     }
 
-    auto initHookParam{reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"))};
+    auto initHookParam = reinterpret_cast<void(*)(const void*)>(
+        dlsym(hookImpl, "init_hook_param")
+    );
     if (!initHookParam) {
-        ALOGE("FAILURE: Couldn't init hook params\n");
+        ALOGE("FAILURE: Couldn't resolve init_hook_param\n");
         return nullptr;
     }
 
-    auto importMapping{[&]() -> adrenotools_gpu_mapping * {
-        if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
-            adrenotools_gpu_mapping *mapping{new adrenotools_gpu_mapping{}};
-            *userMappingHandle = mapping;
-            return mapping;
-        } else {
-        	ALOGW("WARN: Memory mapping flag was not specified\n");
-            return nullptr;
-        }
-    }()};
-
-    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
-
-    if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs)) {
-        ALOGE("FAILURE: Failed to load libvulkan into the isolated namespace\n");
-        return nullptr;
+    adrenotools_gpu_mapping* importMapping = nullptr;
+    if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
+        importMapping = new adrenotools_gpu_mapping{};
+        *userMappingHandle = importMapping;
     }
 
-    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
+    initHookParam(new HookImplParams(
+        featureFlags, tmpLibDir, hookLibDir,
+        customDriverDir, customDriverName,
+        fileRedirectDir, importMapping
+    ));
+	
+    if (!android_dlopen_ext("libmain_hook.so", RTLD_GLOBAL, &extinfo)) {
+        ALOGE("FAILURE: Couldn't load libmain_hook.so — %s\n", dlerror());
+        return nullptr;
+    }
+	
+    extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    extinfo.library_namespace = hookNs;
+
+    return android_dlopen_ext("/system/lib64/libvulkan.so", dlopenFlags, &extinfo);
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
