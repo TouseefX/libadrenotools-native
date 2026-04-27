@@ -410,6 +410,11 @@ void applyTurnipOptimizations() {
     dlclose(libvulkan);
 }
 
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/system_properties.h>
+
 static void apply_sdk_tunables() {
     char sdk_str[8] = {};
     __system_property_get("ro.build.version.sdk", sdk_str);
@@ -440,7 +445,21 @@ static void apply_sdk_tunables() {
 #ifdef OVERCLOCK
     ALOGI("Overclock mode: no TU_OVERRIDE_HEAP_SIZE cap");
 #else
-    setenv("TU_OVERRIDE_HEAP_SIZE", "512", 1);
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGESIZE);
+    long long total_ram_bytes = (long long)pages * page_size;
+    
+    long heap_size_mb = (total_ram_bytes / (1024 * 1024)) / 2;
+    
+    if (heap_size_mb < 256) {
+        heap_size_mb = 256;
+    }
+
+    char heap_str[16];
+    snprintf(heap_str, sizeof(heap_str), "%ld", heap_size_mb);
+    
+    setenv("TU_OVERRIDE_HEAP_SIZE", heap_str, 1);
+    ALOGI("Set TU_OVERRIDE_HEAP_SIZE to %s MB based on system RAM", heap_str);
 #endif
 }
 
