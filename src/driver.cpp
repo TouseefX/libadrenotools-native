@@ -270,6 +270,12 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
+static void *prop_get_stub = nullptr;
+static void *prop_read_cb_stub = nullptr;
+
+static int (*real_system_property_get)(const char *, char *) = nullptr;
+static void (*real_system_property_read_callback)(
+    const prop_info *, void (*)(void *, const char *, const char *, uint32_t), void *) = nullptr;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -287,6 +293,36 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     if (gdpa_stub)
         return gdpa_stub(device, pName);
     return nullptr;
+}
+
+static int fake_system_property_get(const char *name, char *value) {
+    int result = real_system_property_get(name, value);
+
+    if (result == 0 && value[0] == '\0' &&
+        (strncmp(name, "vendor.", 7) == 0 || strncmp(name, "ro.vendor.", 10) == 0)) {
+        LOGI("fake_system_property_get: faking denied prop: %s", name);
+        value[0] = '0';
+        value[1] = '\0';
+        return 1;
+    }
+    return result;
+}
+
+static void fake_system_property_read_callback(
+    const prop_info *pi,
+    void (*callback)(void *, const char *, const char *, uint32_t),
+    void *cookie) {
+
+    auto wrapped_callback = [](void *cookie, const char *name, const char *value, uint32_t serial) {
+        const char *effective = (value && value[0]) ? value : "0";
+        auto real_cb = reinterpret_cast<void(*)(void*, const char*, const char*, uint32_t)>(
+            ((void**)cookie)[0]);
+        void *real_cookie = ((void**)cookie)[1];
+        real_cb(real_cookie, name, effective, serial);
+    };
+
+    void *wrapped[] = {(void*)callback, cookie};
+    real_system_property_read_callback(pi, wrapped_callback, wrapped);
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
@@ -431,6 +467,9 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+
+	prop_get_stub = shadowhook_hook_sym_name("libc.so", "__system_property_get", (void *)fake_system_property_get, (void **)&real_system_property_get);
+    prop_read_cb_stub = shadowhook_hook_sym_name("libc.so", "__system_property_read_callback", (void *)fake_system_property_read_callback, (void **)&real_system_property_read_callback);
 
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
