@@ -386,7 +386,7 @@ void applyTurnipOptimizations() {
                     break;
 
                 case AdrenoGen::A6xx:
-                    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
+                    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision,nolrz", 1);
                     ALOGI("A6xx: sysmem rendering");
                     break;
 
@@ -477,18 +477,7 @@ static void global_atomic_init() {
     setenv("GALLIUM_PRINT_OPTIONS", "0",      1);
     setenv("MESA_DEBUG",            "silent", 1);
     setenv("MESA_NO_ERROR",         "1",      1);
-
-    // Reduce CPU-side validation overhead
-    setenv("MESA_VK_ABORT_ON_DEVICE_LOSS", "0", 1);
-
-    // Descriptor set performance
-    setenv("MESA_VK_DESCRIPTOR_POOL_TEMP", "1", 1);
-
-    // Reduce pipeline stalls
-    setenv("TU_INDIRECT_DRAW_THRESHOLD", "0", 1);
-
-    // Mild anisotropic filtering as a safe default (games that don't request it)
-    setenv("TU_FORCE_ANISO", "4", 1);
+    
 
 #ifdef OVERCLOCK
     setenv("KGSL_CONTEXT_PRIORITY",  "1",       1);
