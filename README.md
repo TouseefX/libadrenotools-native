@@ -28,7 +28,9 @@ Adero 650+
 
 Please create an issue if support for anything else is desired.
 
-Recommend [Drivers](https://github.com/TGMGT/Banners-Turnip)
+Recommend [Native Android Drivers](https://github.com/TGMGT/Banners-Turnip/releases)
+
+And [Mr Purple Driver if your goal is Performance](https://github.com/MrPurple666/purple-turnip/releases)
 
 And Freedeno Drivers
 
