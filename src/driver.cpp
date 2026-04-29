@@ -52,6 +52,44 @@ static PFN_vkGetDeviceProcAddr   g_turnip_gdpa   = nullptr;
 static std::once_flag            g_init_flag;
 static JavaVM                   *g_java_vm        = nullptr;
 
+static constexpr const char *kOwnedEnvVars[] = {
+    // Mesa / ICD
+    "MESA_VULKAN_ICD_SELECT",
+    "MESA_VK_IGNORE_CONFORMANCE_WARNING",
+    "MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE",
+    "MESA_VK_VERSION_OVERRIDE",
+    "MESA_VK_WSI_PRESENT_MODE",
+    "MESA_VK_CACHE_CONTROL",
+    // Shader cache
+    "MESA_GLSL_CACHE_DISABLE",
+    "MESA_GLSL_CACHE_MAX_SIZE",
+    // Mesa debug / error
+    "MESA_DEBUG",
+    "MESA_NO_ERROR",
+    "GALLIUM_PRINT_OPTIONS",
+    // Turnip-specific
+    "TU_DEBUG",
+    "TU_ROBUST_BUFFER_ACCESS",
+    "TU_OVERRIDE_HEAP_SIZE",
+    // Freedreno / device features
+    "FD_DEV_FEATURES",
+    // KGSL / display
+    "KGSL_CONTEXT_PRIORITY",
+    "ADRENO_TURBO",
+    "vblank_mode",
+    // GL thread
+    "mesa_glthread",
+    // Unity integration
+    "UNITY_DISABLE_GRAPHICS_DRIVER_CHECK",
+    "UNITY_VULKAN_ENABLE_VALIDATION_LAYERS",
+    "UNITY_GFX_DEVICE_API",
+    // unused but on old updates 
+    "TU_INDIRECT_DRAW_THRESHOLD",
+    "MESA_VK_DESCRIPTOR_POOL_TEMP",
+    "MESA_VK_ABORT_ON_DEVICE_LOSS",
+    "TU_FORCE_ANISO"
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Adreno generation helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -474,6 +512,11 @@ static void apply_sdk_tunables() {
 // ─────────────────────────────────────────────────────────────────────────────
 __attribute__((constructor))
 static void global_atomic_init() {
+    for (const char *var : kOwnedEnvVars) {
+        if (unsetenv(var) != 0)
+            ALOGW("unsetenv('%s') failed (errno %d)", var, errno);
+    }
+    
     // Mesa ICD / driver selection
     setenv("MESA_VULKAN_ICD_SELECT",              "turnip",  1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "true",    1);
