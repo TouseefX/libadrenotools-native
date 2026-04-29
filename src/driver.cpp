@@ -51,7 +51,6 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa   = nullptr;
 static PFN_vkGetDeviceProcAddr   g_turnip_gdpa   = nullptr;
 static std::once_flag            g_init_flag;
 static JavaVM                   *g_java_vm        = nullptr;
-static std::atomic<bool>         g_turnip_active{false};
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Adreno generation helpers
@@ -97,22 +96,19 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
 
     if (featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
         if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM set but driver file doesn't exist at %s%s",
-                  customDriverDir, customDriverName);
+            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM set but driver file doesn't exist at %s%s", customDriverDir, customDriverName);
             return nullptr;
         }
     }
 
     if (featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
         if (stat(fileRedirectDir, &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT set but redirect dir doesn't exist: %s",
-                  fileRedirectDir);
+            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT set but redirect dir doesn't exist: %s", fileRedirectDir);
             return nullptr;
         }
     }
 
-    auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr,
-                                         ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
+    auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
 
     if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs))
         return nullptr;
@@ -139,17 +135,14 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
         return nullptr;
     }()};
 
-    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir,
-                                      customDriverDir, customDriverName,
-                                      fileRedirectDir, importMapping));
+    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
 
     if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs)) {
         ALOGE("FAILURE: Failed to load libmain_hook into the isolated namespace");
         return nullptr;
     }
 
-    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so",
-                                                   tmpLibDir, dlopenFlags, hookNs);
+    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -196,8 +189,7 @@ bool adrenotools_mem_gpu_allocate(void *handle, uint64_t *size) {
 
     kgsl_gpuobj_alloc gpuobjAlloc{};
     gpuobjAlloc.size  = *size;
-    gpuobjAlloc.flags = KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT
-                      | KGSL_MEMFLAGS_IOCOHERENT;
+    gpuobjAlloc.flags = KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT | KGSL_MEMFLAGS_IOCOHERENT;
 
     kgsl_gpuobj_info info{};
 
@@ -230,8 +222,7 @@ bool adrenotools_mem_cpu_map(void *handle, void *hostPtr, uint64_t size) {
     if (kgslFd < 0)
         return false;
 
-    mapping->host_ptr = mmap(hostPtr, size, PROT_READ | PROT_WRITE,
-                              MAP_SHARED | MAP_FIXED, kgslFd, mapping->gpu_addr);
+    mapping->host_ptr = mmap(hostPtr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, kgslFd, mapping->gpu_addr);
     close(kgslFd);
     return mapping->host_ptr != nullptr;
 }
@@ -262,8 +253,7 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
         return false;
 
     if (setenv(varName, value, 1) != 0) {
-        ALOGE("FAILURE adrenotools_set_freedreno_env: Failed to set '%s' (errno: %d)",
-              varName, errno);
+        ALOGE("FAILURE adrenotools_set_freedreno_env: Failed to set '%s' (errno: %d)", varName, errno);
         return false;
     }
 
@@ -279,7 +269,7 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 //  Vulkan hook trampolines
 // ─────────────────────────────────────────────────────────────────────────────
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
-    if (g_turnip_active.load() && g_turnip_gipa) {
+    if (g_turnip_gipa) {
         auto func = g_turnip_gipa(instance, pName);
         if (func) return func;
     }
@@ -287,7 +277,7 @@ static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, cons
 }
 
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char *pName) {
-    if (g_turnip_active.load() && g_turnip_gdpa) {
+    if (g_turnip_gdpa) {
         auto func = g_turnip_gdpa(device, pName);
         if (func) return func;
     }
@@ -567,10 +557,8 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
     snprintf(tmpdir, sizeof(tmpdir), "%s/turnip_tmp/", base_cache_path);
     mkdir(tmpdir, 0775);
     
-    const char *mesa_cache_version = "25.3";
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/turnip_shader_cache_%s/",
-             base_cache_path, mesa_cache_version);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/turnip_shader_cache/", base_cache_path);
     mkdir(cache_dir, 0775);
     setenv("MESA_DISK_CACHE_DIR", cache_dir, 1);
     ALOGI("Shader cache: %s", cache_dir);
@@ -592,8 +580,7 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
         goto cleanup;
     }
 
-    g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle,
-                                                       "vkGetInstanceProcAddr");
+    g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
     if (!g_turnip_gipa) {
         ALOGE("Failed to resolve vkGetInstanceProcAddr from Turnip");
         dlclose(g_turnip_handle);
@@ -601,8 +588,7 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
         goto cleanup;
     }
 
-    g_turnip_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_turnip_handle,
-                                                     "vkGetDeviceProcAddr");
+    g_turnip_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_turnip_handle, "vkGetDeviceProcAddr");
     if (!g_turnip_gdpa) {
         ALOGE("Failed to resolve vkGetDeviceProcAddr from Turnip");
         dlclose(g_turnip_handle);
@@ -612,13 +598,9 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
 
     ALOGI("Turnip loaded — installing hooks");
 
-    gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name(
-        "libvulkan.so", "vkGetInstanceProcAddr",
-        (void *)hooked_vkGetInstanceProcAddr, nullptr);
+    gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void *)hooked_vkGetInstanceProcAddr, nullptr);
 
-    gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name(
-        "libvulkan.so", "vkGetDeviceProcAddr",
-        (void *)hooked_vkGetDeviceProcAddr, nullptr);
+    gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void *)hooked_vkGetDeviceProcAddr, nullptr);
 
 #ifdef OVERCLOCK
     ALOGI("Overclock mode: turbo on, priority -20 (ensure active cooling!)");
@@ -628,8 +610,7 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
     ALOGI("Standard mode: turbo off");
     adrenotools_set_turbo(false);
 #endif
-
-    g_turnip_active.store(true);
+    
     ALOGI("Turnip hooks installed successfully");
 
 cleanup:
