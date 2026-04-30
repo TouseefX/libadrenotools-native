@@ -304,7 +304,7 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
     return false;
 }
 
-void set_mesa_opt(const char* env_name, const char* value) {
+void set_mesa_opt(const char* env_name, const char* value, int dummy) {
     setenv(env_name, value, 1);
     
     std::string prop = env_name;
@@ -420,7 +420,7 @@ void applyTurnipOptimizations() {
             switch (gen) {
                 case AdrenoGen::A8xx:
                     // A8xx has large GMEM — so no sysmem under clock
-                    setenv("TU_DEBUG", "gmem,noconfirm,noflushall,lowprecision", 1);
+                    set_mesa_opt("TU_DEBUG", "gmem,noconfirm,noflushall,lowprecision", 1);
                     ALOGI("A8xx: gmem rendering enabled");
                     ALOGI("UBWC: Enabling UBWC hint You are using A7xx");
                     setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
@@ -429,10 +429,10 @@ void applyTurnipOptimizations() {
                 case AdrenoGen::A7xx:
                     // A7xx: gmem benefits in overclock; sysmem is cooler at stock.
                #ifdef OVERCLOCK
-                    setenv("TU_DEBUG", "gmem,noconfirm,noflushall,lowprecision", 1);
+                    set_mesa_opt("TU_DEBUG", "gmem,noconfirm,noflushall,lowprecision", 1);
                     ALOGI("A7xx OC: gmem rendering");
                #else
-                    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
+                    set_mesa_opt("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
                     ALOGI("A7xx stock: sysmem rendering");
                #endif
                     ALOGI("UBWC: Enabling UBWC hint You are using A7xx");
@@ -440,20 +440,20 @@ void applyTurnipOptimizations() {
                     break;
 
                 case AdrenoGen::A6xx:
-                    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
+                    set_mesa_opt("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
                     ALOGI("A6xx: sysmem rendering");
                     ALOGI("UBWC: GPU safe No hint required");
                     break;
 
                 case AdrenoGen::A5xx:
                     // A5xx: no UBWC, no reliable LRZ
-                    setenv("TU_DEBUG", "sysmem,noconfirm,nolrz,noubwc", 1);
+                    set_mesa_opt("TU_DEBUG", "sysmem,noconfirm,nolrz,noubwc", 1);
                     setenv("FD_DEV_FEATURES", "", 1);   // clear UBWC hint, not supported
                     ALOGW("A5xx: conservative sysmem, UBWC disabled");
                     break;
 
                 default:
-                    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision,nolrz", 1);
+                    set_mesa_opt("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision,nolrz", 1);
                     ALOGW("Unknown Adreno gen: safe fallback");
                     break;
             }
@@ -524,7 +524,7 @@ static void apply_sdk_tunables() {
     char heap_str[16];
     snprintf(heap_str, sizeof(heap_str), "%ld", heap_size_mb);
     
-    setenv("TU_OVERRIDE_HEAP_SIZE", heap_str, 1);
+    set_mesa_opt("TU_OVERRIDE_HEAP_SIZE", heap_str, 1);
     ALOGI("Set TU_OVERRIDE_HEAP_SIZE to %s MB based on system RAM", heap_str);
 #endif
 }
@@ -550,7 +550,7 @@ static void global_atomic_init() {
     setenv("GALLIUM_PRINT_OPTIONS", "0",      1);
     set_mesa_opt("MESA_DEBUG",            "silent", 1);
     set_mesa_opt("MESA_NO_ERROR",         "1",      1);
-    setenv("TU_ROBUST_BUFFER_ACCESS", "0",   1);
+    set_mesa_opt("TU_ROBUST_BUFFER_ACCESS", "0",   1);
 	// fix gallium
 	set_mesa_opt("MESA_GRALLOC_API", "gralloc4", 1);
     set_mesa_opt("MESA_EXTENSION_OVERRIDE", "-VK_KHR_external_memory_fd", 1);
