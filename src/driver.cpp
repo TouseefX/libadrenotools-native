@@ -530,7 +530,6 @@ static void global_atomic_init() {
     setenv("MESA_NO_ERROR",         "1",      1);
     setenv("TU_ROBUST_BUFFER_ACCESS", "0",   1);
 	// fix gallium
-	setenv("MESA_LOADER_DRIVER_OVERRIDE", "kgsl", 1);
 	setenv("MESA_GRALLOC_API", "gralloc4", 1);
     setenv("MESA_EXTENSION_OVERRIDE", "-VK_KHR_external_memory_fd", 1);
 
