@@ -471,14 +471,12 @@ static void global_atomic_init() {
 	    setenv("ADRENO_TURBO", "1", 1);
 	    setenv("vblank_mode", "0", 1);
 	    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1); // don't use immediate if you want to edit this code take the risk gpu controls the system
-	    setenv("TU_OVERRIDE_HEAP_SIZE", "1024", 1);
 	#else
-	    setenv("KGSL_CONTEXT_PRIORITY", "3", 1);
+	    setenv("KGSL_CONTEXT_PRIORITY", "2", 1);
 	    setenv("mesa_glthread", "false", 1); // creates more heat then expected because system uses opengl
 	    setenv("ADRENO_TURBO", "0", 1);
 	    setenv("vblank_mode", "1", 1);
 	    setenv("MESA_VK_WSI_PRESENT_MODE", "fifo", 1); // Use fifo for stablely
-	    setenv("TU_OVERRIDE_HEAP_SIZE", "512", 1);
         setenv("TU_ROBUST_BUFFER_ACCESS", "0", 1);
 	#endif
     
