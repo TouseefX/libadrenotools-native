@@ -34,6 +34,7 @@
 #include <sys/system_properties.h>
 #include <iostream>
 #include <android/dlext.h>
+#include <algorithm>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN,  "AdrenoToolsPatch", __VA_ARGS__)
@@ -303,6 +304,27 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
     return false;
 }
 
+void set_mesa_opt(const char* env_name, const char* value) {
+    setenv(env_name, value, 1);
+    
+    std::string prop = env_name;
+    std::transform(prop.begin(), prop.end(), prop.begin(), ::tolower);
+    std::replace(prop.begin(), prop.end(), '_', '.');
+    
+    if (prop.compare(0, 5, "mesa.") == 0) {
+        prop.erase(0, 5);
+    }
+    prop = "mesa." + prop;
+    
+    std::string debug_prop = "debug." + prop;
+    
+    if (__system_property_set(debug_prop.c_str(), value) == 0) {
+        ALOGI("Successfully set: %s = %s (Env: %s)", debug_prop.c_str(), value, env_name);
+    } else {
+        ALOGE("Failed to set property: %s", debug_prop.c_str());
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Vulkan hook trampolines
 // ─────────────────────────────────────────────────────────────────────────────
@@ -453,13 +475,13 @@ static void apply_sdk_tunables() {
     if (sdk >= 34) {
         ALOGI("Android 14+ detected: skipping Vulkan version override");
     } else if (sdk >= 32) {
-        setenv("MESA_VK_VERSION_OVERRIDE", "1.3", 1);
+        set_mesa_opt("MESA_VK_VERSION_OVERRIDE", "1.3", 1);
         ALOGI("Android 12L/13: forcing Vulkan 1.3 via override");
     } else if (sdk >= 31) {
-        setenv("MESA_VK_VERSION_OVERRIDE", "1.2", 1);
+        set_mesa_opt("MESA_VK_VERSION_OVERRIDE", "1.2", 1);
         ALOGI("Android 9-12: forcing Vulkan 1.2 via override");
     } else {
-        setenv("MESA_VK_VERSION_OVERRIDE", "1.1", 1);
+        set_mesa_opt("MESA_VK_VERSION_OVERRIDE", "1.1", 1);
         ALOGI("Android <9: forcing Vulkan 1.1 via override");
     }
 
@@ -517,34 +539,34 @@ static void global_atomic_init() {
             ALOGW("unsetenv('%s') failed (errno %d)", var, errno);
     }
     // Mesa ICD / driver selection
-    setenv("MESA_VULKAN_ICD_SELECT",              "turnip",  1);
-    setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "true",    1);
-    setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
+    set_mesa_opt("MESA_VULKAN_ICD_SELECT",              "turnip",  1);
+    set_mesa_opt("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "true",    1);
+    set_mesa_opt("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
     // Shader cache
-    setenv("MESA_GLSL_CACHE_DISABLE",  "false", 1);
-    setenv("MESA_GLSL_CACHE_MAX_SIZE", "512M",  1);
-    setenv("MESA_VK_CACHE_CONTROL",    "1",     1);
+    set_mesa_opt("MESA_GLSL_CACHE_DISABLE",  "false", 1);
+    set_mesa_opt("MESA_GLSL_CACHE_MAX_SIZE", "512M",  1);
+    set_mesa_opt("MESA_VK_CACHE_CONTROL",    "1",     1);
     // Suppress noise
     setenv("GALLIUM_PRINT_OPTIONS", "0",      1);
-    setenv("MESA_DEBUG",            "silent", 1);
-    setenv("MESA_NO_ERROR",         "1",      1);
+    set_mesa_opt("MESA_DEBUG",            "silent", 1);
+    set_mesa_opt("MESA_NO_ERROR",         "1",      1);
     setenv("TU_ROBUST_BUFFER_ACCESS", "0",   1);
 	// fix gallium
-	setenv("MESA_GRALLOC_API", "gralloc4", 1);
-    setenv("MESA_EXTENSION_OVERRIDE", "-VK_KHR_external_memory_fd", 1);
+	set_mesa_opt("MESA_GRALLOC_API", "gralloc4", 1);
+    set_mesa_opt("MESA_EXTENSION_OVERRIDE", "-VK_KHR_external_memory_fd", 1);
 
 #ifdef OVERCLOCK
     setenv("KGSL_CONTEXT_PRIORITY",  "1",       1);
-    setenv("mesa_glthread",          "true",    1);
+    set_mesa_opt("MESA_glthread",          "true",    1);
     setenv("ADRENO_TURBO",           "1",       1);
     setenv("vblank_mode",            "0",       1);
-    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1);
+    set_mesa_opt("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1);
 #else
     setenv("KGSL_CONTEXT_PRIORITY",  "2",    1);
-    setenv("mesa_glthread",          "false", 1);
+    set_mesa_opt("MESA_glthread",          "false", 1);
     setenv("ADRENO_TURBO",           "0",    1);
     setenv("vblank_mode",            "1",    1);
-    setenv("MESA_VK_WSI_PRESENT_MODE", "fifo", 1);
+    set_mesa_opt("MESA_VK_WSI_PRESENT_MODE", "fifo", 1);
 #endif
     // Unity integration
     setenv("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK",   "1",      1);
@@ -580,7 +602,7 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
     ALOGI("Native lib dir: %s", fixed_dir);
 	setenv("VK_ICD_FILENAMES", fixed_dir, 1);
 
-    setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+    set_mesa_opt("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
     
     jclass    contextClass   = env->GetObjectClass(context);
     jmethodID getCacheDir    = env->GetMethodID(contextClass, "getCacheDir",
@@ -600,12 +622,12 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
     char cache_dir[512];
     snprintf(cache_dir, sizeof(cache_dir), "%s/turnip_shader_cache/", base_cache_path);
     mkdir(cache_dir, 0775);
-    setenv("MESA_DISK_CACHE_DIR", cache_dir, 1);
+    set_mesa_opt("MESA_DISK_CACHE_DIR", cache_dir, 1);
     ALOGI("Shader cache: %s", cache_dir);
 
     // ── load Turnip ───────────────────────────────────────────────────────────
     g_turnip_handle = adrenotools_open_libvulkan(
-        RTLD_LOCAL | RTLD_NOW,
+        RTLD_GLOBAL | RTLD_NOW,
         ADRENOTOOLS_DRIVER_CUSTOM,
         tmpdir,
         native_lib_dir,
