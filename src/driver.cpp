@@ -305,12 +305,18 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 }
 
 void set_mesa_opt(const char* env_name, const char* value, int dummy) {
-    // Keep the env var updated for the local process
     setenv(env_name, value, 1);
     
     char key[PROP_NAME_MAX];
     char *p = key;
     char *end = key + PROP_NAME_MAX;
+	
+    const char* final_value = value;
+    if (strcasecmp(value, "true") == 0) {
+        final_value = "1";
+    } else if (strcasecmp(value, "false") == 0) {
+        final_value = "0";
+    }
 	
     if (strncmp(env_name, "MESA_", 5) != 0) {
         p += strlcpy(p, "mesa.", end - p);
@@ -324,11 +330,11 @@ void set_mesa_opt(const char* env_name, const char* value, int dummy) {
     char debug_prop[PROP_NAME_MAX];
     snprintf(debug_prop, sizeof(debug_prop), "debug.%s", key);
     
-    if (__system_property_set(debug_prop, value) == 0) {
-        ALOGI("Successfully set: %s = %s", debug_prop, value);
+    if (__system_property_set(debug_prop, final_value) == 0) {
+        ALOGI("Successfully set: %s = %s", debug_prop, final_value);
     } else {
-        if (__system_property_set(key, value) == 0) {
-            ALOGI("Successfully set: %s = %s", key, value);
+        if (__system_property_set(key, final_value) == 0) {
+            ALOGI("Successfully set: %s = %s", key, final_value);
         } else {
             ALOGE("Failed to set property: %s", debug_prop);
         }
