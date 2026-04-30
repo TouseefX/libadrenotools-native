@@ -51,7 +51,6 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa   = nullptr;
 static PFN_vkGetDeviceProcAddr   g_turnip_gdpa   = nullptr;
 static std::once_flag            g_init_flag;
 static JavaVM                   *g_java_vm        = nullptr;
-static void* (*real_dlopen)(const char*, int) = nullptr;
 
 static constexpr const char *kOwnedEnvVars[] = {
     // Mesa / ICD
@@ -323,29 +322,6 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     return gdpa_stub ? gdpa_stub(device, pName) : nullptr;
 }
 
-static void* hooked_dlopen(const char* filename, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-
-    void* caller = BYTEHOOK_RETURN_ADDRESS();
-    Dl_info info{};
-    if (dladdr(caller, &info) && info.dli_fname &&
-        (uintptr_t)info.dli_fname > 0x1000) {  // guard against 0x1 style bad ptrs
-        if (strstr(info.dli_fname, "libhook_impl")   ||
-            strstr(info.dli_fname, "libadrenotools")) {
-            return real_dlopen(filename, flags);
-        }
-	}
-
-	if (filename && (strstr(filename, "libvulkan.so") ||
-                     strstr(filename, "vulkan.adreno.so") ||
-                     strstr(filename, "vulkan.msm8998.so"))) {
-        ALOGI("dlopen intercepted: %s → Turnip", filename);
-        return g_turnip_handle;
-	}
-
-    return real_dlopen(filename, flags);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  JNI helper
 // ─────────────────────────────────────────────────────────────────────────────
@@ -577,10 +553,7 @@ static void global_atomic_init() {
     // Per-GPU TU_DEBUG flags
     applyTurnipOptimizations();
 
-    real_dlopen = reinterpret_cast<decltype(real_dlopen)>(dlsym(RTLD_DEFAULT, "dlopen"));
-
     shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
-    bytehook_init(BYTEHOOK_MODE_MANUAL, false);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -661,9 +634,7 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
     }
 
     ALOGI("Turnip loaded — installing hooks");
-
-    bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
-
+	
     gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void *)hooked_vkGetInstanceProcAddr, nullptr);
     gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void *)hooked_vkGetDeviceProcAddr, nullptr);
 
