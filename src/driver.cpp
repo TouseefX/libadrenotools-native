@@ -529,7 +529,10 @@ static void global_atomic_init() {
     setenv("MESA_DEBUG",            "silent", 1);
     setenv("MESA_NO_ERROR",         "1",      1);
     setenv("TU_ROBUST_BUFFER_ACCESS", "0",   1);
-    
+	// fix gallium
+	setenv("MESA_LOADER_DRIVER_OVERRIDE", "kgsl", 1);
+	setenv("MESA_GRALLOC_API", "gralloc4", 1);
+    setenv("MESA_EXTENSION_OVERRIDE", "-VK_KHR_external_memory_fd", 1);
 
 #ifdef OVERCLOCK
     setenv("KGSL_CONTEXT_PRIORITY",  "1",       1);
@@ -548,8 +551,6 @@ static void global_atomic_init() {
     setenv("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK",   "1",      1);
     setenv("UNITY_VULKAN_ENABLE_VALIDATION_LAYERS",  "0",      1);
     setenv("UNITY_GFX_DEVICE_API",                  "vulkan", 1);
-	setenv("SKIA_RENDERER", "skiavk", 1);
-    setenv("HWUI_RENDERER", "skiavk", 1);
     // SDK-aware tunables (Vulkan version override, UBWC, heap)
     apply_sdk_tunables();
     // Per-GPU TU_DEBUG flags
@@ -578,6 +579,7 @@ static void init_turnip_driver(JNIEnv *env, jobject context) {
     char fixed_dir[512];
     snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
     ALOGI("Native lib dir: %s", fixed_dir);
+	setenv("VK_ICD_FILENAMES", fixed_dir, 1);
 
     setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
     
