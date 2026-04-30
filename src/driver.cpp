@@ -334,7 +334,7 @@ static const prop_info *my_system_property_find(const char *name) {
 static int my_system_property_get(const char *name, char *value) {
     if (name && strncmp(name, "vendor.mesa.", 12) == 0) {
         if (strcmp(name, "vendor.mesa.driver") == 0) {
-            strcpy(value, "msm");
+            strcpy(value, "kgsl");
             return 3;
         }
         if (strcmp(name, "vendor.mesa.gralloc") == 0) {
