@@ -277,7 +277,8 @@ struct LibRange {
     uintptr_t end;
 };
 
-static std::vector<LibRange> bypass_ranges;
+static LibRange bypass_ranges[64]; 
+static size_t bypass_ranges_count = 0;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -298,19 +299,19 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 }
 
 void init_caller_check() {
-    bypass_ranges.clear();
+    bypass_ranges_count = 0; // Reset count
     dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) {
         if (strstr(info->dlpi_name, "libadrenotools.so") || 
             strstr(info->dlpi_name, "libhook_impl.so")) {
             
-            uintptr_t min_vaddr = -1, max_vaddr = 0;
             for (int i = 0; i < info->dlpi_phnum; i++) {
                 if (info->dlpi_phdr[i].p_type == PT_LOAD) {
-                    uintptr_t start = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
-                    uintptr_t end = start + info->dlpi_phdr[i].p_memsz;
-                    
-                    bypass_ranges.push_back({start, end});
-                    ALOGI("Whitelisted range: %lx - %lx for %s", start, end, info->dlpi_name);
+                    if (bypass_ranges_count < 64) { // Bounds check
+                        uintptr_t start = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
+                        uintptr_t end = start + info->dlpi_phdr[i].p_memsz;
+                        
+                        bypass_ranges[bypass_ranges_count++] = {start, end};
+                    }
                 }
             }
         }
@@ -318,27 +319,38 @@ void init_caller_check() {
     }, nullptr);
 }
 
+static bool safe_contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return false;
+    for (const char* h = haystack; *h; ++h) {
+        const char *h_part = h, *n_part = needle;
+        while (*h_part && *n_part && *h_part == *n_part) {
+            h_part++;
+            n_part++;
+        }
+        if (!*n_part) return true;
+    }
+    return false;
+}
+
 static void* hooked_dlopen(const char* filename, int flags) {
+    if (filename == nullptr || (uintptr_t)filename < 0x1000) {
+        return real_dlopen(filename, flags);
+    }
+
     BYTEHOOK_STACK_SCOPE();
     uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
-	
-    if (caller < 0x1000 || filename == nullptr || (uintptr_t)filename < 0x1000) {
-        return real_dlopen(filename, flags);
-	}
-	
-    for (const auto& range : bypass_ranges) {
-        if (caller >= range.start && caller <= range.end) {
+
+    for (size_t i = 0; i < bypass_ranges_count; i++) { // Use a fixed array/count
+        if (caller >= bypass_ranges[i].start && caller <= bypass_ranges[i].end) {
             return real_dlopen(filename, flags);
         }
     }
 	
-    if (strstr(filename, "vulkan")) {
-        if (strstr(filename, "libvulkan.so") || 
-            strstr(filename, "vulkan.adreno.so") || 
-            strstr(filename, "vulkan.msm8998.so")) {
+    if (safe_contains(filename, "vulkan")) {
+        if (safe_contains(filename, "libvulkan.so") || 
+            safe_contains(filename, "vulkan.adreno.so")) {
             
             if (g_turnip_handle != nullptr) {
-                ALOGI("Success! Intercepted Vulkan from: %p", (void*)caller);
                 return g_turnip_handle;
             }
         }
