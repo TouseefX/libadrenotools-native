@@ -272,8 +272,12 @@ static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
-static uintptr_t adrenotools_start = 0;
-static uintptr_t adrenotools_end = 0;
+struct LibRange {
+    uintptr_t start;
+    uintptr_t end;
+};
+
+static std::vector<LibRange> bypass_ranges;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -294,15 +298,20 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 }
 
 void init_caller_check() {
+    bypass_ranges.clear();
     dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) {
-        if (strstr(info->dlpi_name, "libadrenotools") || 
-            strstr(info->dlpi_name, "libhook_impl")) {
+        if (strstr(info->dlpi_name, "libadrenotools.so") || 
+            strstr(info->dlpi_name, "libhook_impl.so")) {
             
-            adrenotools_start = info->dlpi_addr;
-            // Find the end by looking at segments
+            uintptr_t min_vaddr = -1, max_vaddr = 0;
             for (int i = 0; i < info->dlpi_phnum; i++) {
-                uintptr_t end = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr + info->dlpi_phdr[i].p_memsz;
-                if (end > adrenotools_end) adrenotools_end = end;
+                if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+                    uintptr_t start = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
+                    uintptr_t end = start + info->dlpi_phdr[i].p_memsz;
+                    
+                    bypass_ranges.push_back({start, end});
+                    ALOGI("Whitelisted range: %lx - %lx for %s", start, end, info->dlpi_name);
+                }
             }
         }
         return 0;
@@ -311,15 +320,16 @@ void init_caller_check() {
 
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
-    void* caller = BYTEHOOK_RETURN_ADDRESS();
+    uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
 	
-    uintptr_t addr = (uintptr_t)caller;
-    if (addr >= adrenotools_start && addr <= adrenotools_end) {
+    if (caller < 0x1000 || filename == nullptr || (uintptr_t)filename < 0x1000) {
         return real_dlopen(filename, flags);
-    }
+	}
 	
-    if (filename == nullptr || (uintptr_t)filename < 0x1000) {
-        return real_dlopen(filename, flags);
+    for (const auto& range : bypass_ranges) {
+        if (caller >= range.start && caller <= range.end) {
+            return real_dlopen(filename, flags);
+        }
     }
 	
     if (strstr(filename, "vulkan")) {
@@ -328,7 +338,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
             strstr(filename, "vulkan.msm8998.so")) {
             
             if (g_turnip_handle != nullptr) {
-                ALOGI("Intercepted Vulkan load: %s -> Using Turnip", filename);
+                ALOGI("Success! Intercepted Vulkan from: %p", (void*)caller);
                 return g_turnip_handle;
             }
         }
