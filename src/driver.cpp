@@ -10,7 +10,6 @@
 #include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <android/api-level.h>
@@ -35,7 +34,7 @@
 #include <sys/system_properties.h>
 #include <iostream>
 #include <android/dlext.h>
-#include <sys/mman.h>
+#include <link.h>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
@@ -273,6 +272,12 @@ static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
+struct LibRange {
+    uintptr_t start;
+    uintptr_t end;
+};
+
+static std::vector<LibRange> bypass_ranges;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -292,31 +297,40 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     return nullptr;
 }
 
-static bool safe_dladdr(uintptr_t addr, Dl_info* info) {
-    if (addr < 0x1000) return false;
-	
-    unsigned char vec = 0;
-    uintptr_t page_addr = addr & ~(uintptr_t)(PAGE_SIZE - 1);
-    if (mincore((void*)page_addr, PAGE_SIZE, &vec) != 0)
-        return false;
-
-    // Now safe to call
-    return dladdr((void*)addr, info) != 0;
+void init_caller_check() {
+    bypass_ranges.clear();
+    dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) {
+        if (strstr(info->dlpi_name, "libadrenotools.so") || 
+            strstr(info->dlpi_name, "libhook_impl.so")) {
+            
+            uintptr_t min_vaddr = -1, max_vaddr = 0;
+            for (int i = 0; i < info->dlpi_phnum; i++) {
+                if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+                    uintptr_t start = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
+                    uintptr_t end = start + info->dlpi_phdr[i].p_memsz;
+                    
+                    bypass_ranges.push_back({start, end});
+                    ALOGI("Whitelisted range: %lx - %lx for %s", start, end, info->dlpi_name);
+                }
+            }
+        }
+        return 0;
+    }, nullptr);
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
     uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
-
-    if (!filename || caller < 0x1000)
-        return real_dlopen(filename, flags);
 	
-    Dl_info info{};
-    if (safe_dladdr(caller, &info)) {
-        const char* lib = info.dli_fname ? info.dli_fname : "";
-        if (strstr(lib, "libadrenotools") || strstr(lib, "libhook_impl"))
-            return real_dlopen(filename, flags);
+    if (caller < 0x1000 || filename == nullptr || (uintptr_t)filename < 0x1000) {
+        return real_dlopen(filename, flags);
 	}
+	
+    for (const auto& range : bypass_ranges) {
+        if (caller >= range.start && caller <= range.end) {
+            return real_dlopen(filename, flags);
+        }
+    }
 	
     if (strstr(filename, "vulkan")) {
         if (strstr(filename, "libvulkan.so") || 
