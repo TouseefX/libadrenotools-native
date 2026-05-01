@@ -559,18 +559,17 @@ static void global_atomic_init() {
     setenv("MESA_DEBUG", "silent", 1);
 	setenv("MESA_NO_ERROR", "1", 1);
 	setenv("mesa_glthread", "true", 1);
+	setenv("vblank_mode", "0", 1);
+	setenv("TU_ROBUST_BUFFER_ACCESS", "0", 1);
 
 	#ifdef OVERCLOCK
 	    setenv("KGSL_CONTEXT_PRIORITY", "1", 1);
 	    setenv("ADRENO_TURBO", "1", 1);
-	    setenv("vblank_mode", "0", 1);
-	    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1); // don't use immediate if you want to edit this code take the risk gpu controls the system
+	    setenv("MESA_VK_WSI_PRESENT_MODE", "immediate", 1);
 	#else
 	    setenv("KGSL_CONTEXT_PRIORITY", "2", 1);
 	    setenv("ADRENO_TURBO", "0", 1);
-	    setenv("vblank_mode", "1", 1);
-	    setenv("MESA_VK_WSI_PRESENT_MODE", "fifo", 1); // Use fifo for stablely
-        setenv("TU_ROBUST_BUFFER_ACCESS", "0", 1);
+	    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1);
 	#endif
     
     setenv("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK", "1", 1);
