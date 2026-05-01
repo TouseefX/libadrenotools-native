@@ -366,6 +366,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
 
         std::lock_guard<std::mutex> lock(g_turnip_mutex);
         if (g_turnip_handle != nullptr) {
+			ALOGI("dlopen hook turnip handled");
             result = g_turnip_handle;
         }
     }
