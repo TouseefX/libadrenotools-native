@@ -305,38 +305,35 @@ void init_caller_check() {
         return;
 
     int expected = 0;
-    if (!g_init_state.compare_exchange_strong(
-            expected, 1,
-            std::memory_order_acq_rel,
-            std::memory_order_acquire))
-    {
-        while (g_init_state.load(std::memory_order_acquire) != 2)
-            __asm__ __volatile__("yield" ::: "memory"); // ARM; use "pause" on x86
+    if (!g_init_state.compare_exchange_strong(expected, 1,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+        while (g_init_state.load(std::memory_order_acquire) != 2) {
+            __asm__ __volatile__("yield" ::: "memory");
+        }
         return;
     }
 	
     FILE* f = fopen("/proc/self/maps", "r");
+    int local_count = 0; // Use as local
+
     if (f) {
         char line[512];
-        int  count = 0;
-
-        while (count < 64 && fgets(line, sizeof(line), f)) {
-            if (strstr(line, "libadrenotools.so") ||
-                strstr(line, "libhook_impl.so"))
-            {
+        // Protect against overflow (limit to 64)
+        while (local_count < 64 && fgets(line, sizeof(line), f)) {
+            if (strstr(line, "libadrenotools.so") || strstr(line, "libhook_impl.so")) {
                 uintptr_t s, e;
-                if (sscanf(line, "%lx-%lx", &s, &e) == 2)
-                    bypass_ranges[count++] = {s, e};
+                if (sscanf(line, "%lx-%lx", &s, &e) == 2) {
+                    bypass_ranges[local_count++] = {s, e};
+                }
             }
         }
         fclose(f);
 		
-        bypass_ranges_count.store(count, std::memory_order_release);
+        bypass_ranges_count.store(local_count, std::memory_order_release); // now we store
     }
-
+	
     g_init_state.store(2, std::memory_order_release);
 }
-
 static bool safe_contains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     for (const char* h = haystack; *h; ++h) {
@@ -351,6 +348,10 @@ static bool safe_contains(const char* haystack, const char* needle) {
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
+    if (g_init_state.load(std::memory_order_acquire) != 2) {
+        return real_dlopen(filename, flags);
+    }
+	
     if (!filename || (uintptr_t)filename < 0x1000)
         return real_dlopen(filename, flags);
 
@@ -358,6 +359,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
         return real_dlopen(filename, flags);
 
     g_in_hook = true;
+    struct ScopeGuard { ~ScopeGuard() { g_in_hook = false; } } guard;
 
     BYTEHOOK_STACK_SCOPE();
     const uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
@@ -365,23 +367,18 @@ static void* hooked_dlopen(const char* filename, int flags) {
     const int count = bypass_ranges_count.load(std::memory_order_acquire);
     for (int i = 0; i < count; ++i) {
         if (caller >= bypass_ranges[i].start && caller < bypass_ranges[i].end) {
-            g_in_hook = false;
             return real_dlopen(filename, flags);
         }
     }
 	
-    void* result = nullptr;
-    if (filename && (strstr(filename, "libvulkan.so") ||
-                     strstr(filename, "vulkan.adreno.so")))
+    if (g_turnip_handle && (strstr(filename, "libvulkan.so") || 
+                            strstr(filename, "vulkan.adreno.so"))) 
     {
-        if (g_turnip_handle) {
-            ALOGI("dlopen hook turnip handled");
-            result = g_turnip_handle;
-        }
+        ALOGI("dlopen hook turnip handled for: %s", filename);
+        return g_turnip_handle;
     }
-
-    g_in_hook = false;
-    return result ? result : real_dlopen(filename, flags);
+	
+    return real_dlopen(filename, flags);
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
