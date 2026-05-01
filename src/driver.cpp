@@ -35,6 +35,9 @@
 #include <iostream>
 #include <android/dlext.h>
 #include <link.h>
+#include <cstdio>
+#include <cstring>
+#include <cstdint>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
@@ -266,21 +269,18 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 }
 
 static std::mutex g_init_mutex;
-static std::mutex g_turnip_mutex;
 static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
-struct MemRange {
-    uintptr_t start;
-    uintptr_t end;
-};
-static std::mutex g_ranges_mutex;
-static MemRange bypass_ranges[64];
-static size_t bypass_ranges_count = 0;
-thread_local bool g_in_hook = false;
+struct AddrRange { uintptr_t start, end; };
+
+static AddrRange        bypass_ranges[64];
+static std::atomic<int> bypass_ranges_count{0};   // written once, read many
+static std::atomic<int> g_init_state{0};           // 0=uninit 1=running 2=done
+static thread_local bool g_in_hook = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -301,22 +301,40 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 }
 
 void init_caller_check() {
-    std::call_once(g_init_flag, []() {
-        FILE* f = fopen("/proc/self/maps", "r");
-        if (!f) return;
+    if (g_init_state.load(std::memory_order_acquire) == 2)
+        return;
 
+    int expected = 0;
+    if (!g_init_state.compare_exchange_strong(
+            expected, 1,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+        while (g_init_state.load(std::memory_order_acquire) != 2)
+            __asm__ __volatile__("yield" ::: "memory"); // ARM; use "pause" on x86
+        return;
+    }
+	
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (f) {
         char line[512];
-        std::lock_guard<std::mutex> lock(g_ranges_mutex);
-        while (fgets(line, sizeof(line), f) && bypass_ranges_count < 64) {
-            if (strstr(line, "libadrenotools.so") || strstr(line, "libhook_impl.so")) {
-                uintptr_t start, end;
-                if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
-                    bypass_ranges[bypass_ranges_count++] = {start, end};
-                }
+        int  count = 0;
+
+        while (count < 64 && fgets(line, sizeof(line), f)) {
+            if (strstr(line, "libadrenotools.so") ||
+                strstr(line, "libhook_impl.so"))
+            {
+                uintptr_t s, e;
+                if (sscanf(line, "%lx-%lx", &s, &e) == 2)
+                    bypass_ranges[count++] = {s, e};
             }
         }
         fclose(f);
-    });
+		
+        bypass_ranges_count.store(count, std::memory_order_release);
+    }
+
+    g_init_state.store(2, std::memory_order_release);
 }
 
 static bool safe_contains(const char* haystack, const char* needle) {
@@ -333,40 +351,31 @@ static bool safe_contains(const char* haystack, const char* needle) {
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
-    if (filename == nullptr || (uintptr_t)filename < 0x1000)
+    if (!filename || (uintptr_t)filename < 0x1000)
         return real_dlopen(filename, flags);
-	
+
     if (g_in_hook)
         return real_dlopen(filename, flags);
 
     g_in_hook = true;
 
     BYTEHOOK_STACK_SCOPE();
-    uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
+    const uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
 	
-    bool bypass = false;
-    {
-        std::lock_guard<std::mutex> lock(g_ranges_mutex);
-        for (size_t i = 0; i < bypass_ranges_count; i++) {
-            if (caller >= bypass_ranges[i].start && caller <= bypass_ranges[i].end) {
-                bypass = true;
-                break;
-            }
+    const int count = bypass_ranges_count.load(std::memory_order_acquire);
+    for (int i = 0; i < count; ++i) {
+        if (caller >= bypass_ranges[i].start && caller < bypass_ranges[i].end) {
+            g_in_hook = false;
+            return real_dlopen(filename, flags);
         }
     }
-
-    if (bypass) {
-        g_in_hook = false;
-        return real_dlopen(filename, flags);
-    }
-
+	
     void* result = nullptr;
-    if (safe_contains(filename, "libvulkan.so") ||
-        safe_contains(filename, "vulkan.adreno.so")) {
-
-        std::lock_guard<std::mutex> lock(g_turnip_mutex);
-        if (g_turnip_handle != nullptr) {
-			ALOGI("dlopen hook turnip handled");
+    if (filename && (strstr(filename, "libvulkan.so") ||
+                     strstr(filename, "vulkan.adreno.so")))
+    {
+        if (g_turnip_handle) {
+            ALOGI("dlopen hook turnip handled");
             result = g_turnip_handle;
         }
     }
