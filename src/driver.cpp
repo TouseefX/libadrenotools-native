@@ -34,6 +34,7 @@
 #include <sys/system_properties.h>
 #include <iostream>
 #include <android/dlext.h>
+#include <errno.h>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
@@ -291,20 +292,34 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
-    if (!filename) return real_dlopen(filename, flags);
-	
-    if (g_turnip_handle != nullptr) {
-        // Check for common Vulkan names
-        if (filename[0] == 'l' && strstr(filename, "libvulkan.so")) {
-            return g_turnip_handle;
+	const char* progname = getprogname();
+    if (progname != nullptr) {
+        if (strcmp(progname, "surfaceflinger") == 0 || 
+            strcmp(progname, "system_server") == 0 ||
+            strstr(progname, "systemui") != nullptr) {
+            return real_dlopen(filename, flags);
         }
-        if (strstr(filename, "vulkan.adreno.so")) {
-            return g_turnip_handle;
+	}
+	
+    if (filename == nullptr || filename[0] == '\0') {
+        return real_dlopen(filename, flags);
+    }
+	
+    if (strstr(filename, "vulkan") != nullptr) {
+        if (strstr(filename, "libvulkan.so") || 
+            strstr(filename, "vulkan.adreno.so") || 
+            strstr(filename, "vulkan.msm8998.so")) {
+            
+            if (g_turnip_handle != nullptr) {
+                ALOGI("Intercepted Vulkan load: %s -> Using Turnip", filename);
+                return g_turnip_handle;
+            }
         }
     }
-
+	
     return real_dlopen(filename, flags);
 }
+
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
     char* native_libdir = nullptr;
