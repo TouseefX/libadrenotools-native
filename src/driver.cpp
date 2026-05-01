@@ -334,6 +334,7 @@ void init_caller_check() {
 	
     g_init_state.store(2, std::memory_order_release);
 }
+
 static bool safe_contains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     for (const char* h = haystack; *h; ++h) {
@@ -371,8 +372,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
         }
     }
 	
-    if (g_turnip_handle && (strstr(filename, "libvulkan.so") || 
-                            strstr(filename, "vulkan.adreno.so"))) 
+    if (g_turnip_handle && (safe_contains(filename, "vulkan") || safe_contains(filename, "adreno")))
     {
         ALOGI("dlopen hook turnip handled for: %s", filename);
         return g_turnip_handle;
@@ -441,13 +441,13 @@ void applyTurnipOptimizations() {
 				
 				#ifdef OVERCLOCK
 				    ALOGI("Use Gmem");
-				    setenv("TU_DEBUG", "gmem,noconfirm,noflushall,lowprecision", 1);
+				    setenv("TU_DEBUG", "gmem,noconfirm,noflushall", 1);
 				#else
 				    ALOGI("Use Sysmem");
-				    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
+				    setenv("TU_DEBUG", "sysmem,noconfirm,noflushall", 1);
 				#endif
             } else {
-                setenv("TU_DEBUG", "sysmem,noconfirm,noflushall,lowprecision", 1);
+                setenv("TU_DEBUG", "sysmem,noconfirm,noflushall", 1);
                 ALOGI("Use System Memory");
             }
         }
