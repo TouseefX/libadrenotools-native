@@ -272,6 +272,7 @@ static std::mutex g_init_mutex;
 static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
+static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
 struct AddrRange { uintptr_t start, end; };
