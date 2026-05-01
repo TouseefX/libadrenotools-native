@@ -270,6 +270,7 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
+static void* (*real_dlopen)(const char*, int) = nullptr;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -287,6 +288,22 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     if (gdpa_stub)
         return gdpa_stub(device, pName);
     return nullptr;
+}
+
+static void* hooked_dlopen(const char* filename, int flags) {
+    if (!filename) return real_dlopen(filename, flags);
+	
+    if (g_turnip_handle != nullptr) {
+        // Check for common Vulkan names
+        if (filename[0] == 'l' && strstr(filename, "libvulkan.so")) {
+            return g_turnip_handle;
+        }
+        if (strstr(filename, "vulkan.adreno.so")) {
+            return g_turnip_handle;
+        }
+    }
+
+    return real_dlopen(filename, flags);
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
@@ -429,6 +446,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Turnip loaded, setting up hooks...");
 
+	bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
+
     gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 	
@@ -528,7 +547,10 @@ static void global_atomic_init() {
 
 	applyTurnipOptimizations();
 
-    shadowhook_init(SHADOWHOOK_MODE_SHARED, true);
+	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(dlsym(RTLD_DEFAULT, "dlopen"));
+
+    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+	bytehook_init(BYTEHOOK_MODE_MANUAL, false);
 }
 
 void perform_init(JavaVM* vm) {
