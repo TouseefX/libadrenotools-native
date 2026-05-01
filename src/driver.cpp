@@ -279,6 +279,7 @@ struct MemRange {
 static std::mutex g_ranges_mutex;
 static MemRange bypass_ranges[64];
 static size_t bypass_ranges_count = 0;
+thread_local bool g_in_hook = false
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -300,24 +301,20 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 
 void init_caller_check() {
     std::call_once(g_init_flag, []() {
+        FILE* f = fopen("/proc/self/maps", "r");
+        if (!f) return;
+
+        char line[512];
         std::lock_guard<std::mutex> lock(g_ranges_mutex);
-        bypass_ranges_count = 0;
-        
-        dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) {
-            if (strstr(info->dlpi_name, "libadrenotools.so") ||
-                strstr(info->dlpi_name, "libhook_impl.so")) {
-                for (int i = 0; i < info->dlpi_phnum; i++) {
-                    if (info->dlpi_phdr[i].p_type == PT_LOAD) {
-                        if (bypass_ranges_count < 64) {
-                            uintptr_t start = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
-                            uintptr_t end   = start + info->dlpi_phdr[i].p_memsz;
-                            bypass_ranges[bypass_ranges_count++] = {start, end};
-                        }
-                    }
+        while (fgets(line, sizeof(line), f) && bypass_ranges_count < 64) {
+            if (strstr(line, "libadrenotools.so") || strstr(line, "libhook_impl.so")) {
+                uintptr_t start, end;
+                if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+                    bypass_ranges[bypass_ranges_count++] = {start, end};
                 }
             }
-            return 0;
-        }, nullptr);
+        }
+        fclose(f);
     });
 }
 
@@ -337,27 +334,43 @@ static bool safe_contains(const char* haystack, const char* needle) {
 static void* hooked_dlopen(const char* filename, int flags) {
     if (filename == nullptr || (uintptr_t)filename < 0x1000)
         return real_dlopen(filename, flags);
+	
+    if (g_in_hook)
+        return real_dlopen(filename, flags);
+
+    g_in_hook = true;
 
     BYTEHOOK_STACK_SCOPE();
     uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
-
+	
+    bool bypass = false;
     {
         std::lock_guard<std::mutex> lock(g_ranges_mutex);
         for (size_t i = 0; i < bypass_ranges_count; i++) {
-            if (caller >= bypass_ranges[i].start && caller <= bypass_ranges[i].end)
-                return real_dlopen(filename, flags);
+            if (caller >= bypass_ranges[i].start && caller <= bypass_ranges[i].end) {
+                bypass = true;
+                break;
+            }
         }
     }
 
-    if (safe_contains(filename, "vulkan")) {
-        if (safe_contains(filename, "libvulkan.so") ||
-            safe_contains(filename, "vulkan.adreno.so")) {
-            if (g_turnip_handle != nullptr)
-                return g_turnip_handle;
+    if (bypass) {
+        g_in_hook = false;
+        return real_dlopen(filename, flags);
+    }
+
+    void* result = nullptr;
+    if (safe_contains(filename, "libvulkan.so") ||
+        safe_contains(filename, "vulkan.adreno.so")) {
+
+        std::lock_guard<std::mutex> lock(g_turnip_mutex);
+        if (g_turnip_handle != nullptr) {
+            result = g_turnip_handle;
         }
     }
 
-    return real_dlopen(filename, flags);
+    g_in_hook = false;
+    return result ? result : real_dlopen(filename, flags);
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
