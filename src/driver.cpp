@@ -271,6 +271,7 @@ static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
+static thread_local bool is_hooking = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (g_turnip_gipa) {
@@ -291,10 +292,16 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
+    if (is_hooking) {
+        return real_dlopen(filename, flags);
+    }
+
     if (filename == nullptr || filename[0] == '\0') {
         return real_dlopen(filename, flags);
     }
 	
+    is_hooking = true;
+
     if (strstr(filename, "vulkan") != nullptr) {
         if (strstr(filename, "libvulkan.so") || 
             strstr(filename, "vulkan.adreno.so") || 
@@ -302,12 +309,15 @@ static void* hooked_dlopen(const char* filename, int flags) {
             
             if (g_turnip_handle != nullptr) {
                 ALOGI("Intercepted Vulkan load: %s -> Using Turnip", filename);
+                is_hooking = false; // Reset before return
                 return g_turnip_handle;
             }
         }
     }
 	
-    return real_dlopen(filename, flags);
+    void* result = real_dlopen(filename, flags);
+    is_hooking = false;
+    return result;
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
