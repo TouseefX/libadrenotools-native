@@ -439,7 +439,7 @@ void applyTurnipOptimizations() {
 				#ifdef OVERCLOCK
 				    setenv("TU_DEBUG", "noconform,hiprio,forcecb,noflushall,3d_load,dynamic,unaligned_store,nolrzfc", 1);
 				#else
-				    setenv("TU_DEBUG", "noconform,noflushall,3d_load", 1);
+				    setenv("TU_DEBUG", "noconform,noflushall,3d_load,dynamic", 1);
 				#endif
             } else {
                 #ifdef OVERCLOCK
@@ -468,7 +468,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", "Native Lib Dir: %s", fixed_dir);
     
     setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
-    
     
     jclass contextClass = env->GetObjectClass(context);
     jmethodID getCacheDir = env->GetMethodID(contextClass, "getCacheDir", "()Ljava/io/File;");
@@ -549,10 +548,9 @@ static void global_atomic_init() {
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
 	setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
-    setenv("MESA_SHADER_CACHE_MAX_SIZE", "1G", 1);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 1);
 	setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 1);
 	setenv("MESA_DISK_CACHE_READ_ONLY", "false", 1);
-    setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
     
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_DEBUG", "silent", 1);
@@ -598,6 +596,7 @@ static void global_atomic_init() {
     ALOGI("Android SDK: %d", sdk);
 
     unsetenv("MESA_VK_VERSION_OVERRIDE");
+	unsetenv("FD_DEV_FEATURES");
 
 	char oneui_str[PROP_VALUE_MAX] = {0};
     bool is_affected_oneui = false;
