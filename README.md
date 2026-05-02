@@ -28,6 +28,8 @@ Vulkan 1.3+ and driver must match your vulkan verison unless you're in the newer
 
 Adero 620+
 
+8GB of RAM (Recommended)
+
 Please create an issue if support for anything else is desired.
 
 Recommend [Native Android Drivers](https://github.com/TGMGT/Banners-Turnip/releases)
