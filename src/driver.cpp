@@ -559,9 +559,7 @@ static void global_atomic_init() {
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 1);
 	setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 1);
 	setenv("MESA_DISK_CACHE_READ_ONLY", "0", 1);
-	setenv("TU_GMEM_MINSIZE", "128", 1);
-	setenv("MESA_VK_SEMAPHORE_TYPE", "timeline", 1);
-    
+	
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_DEBUG", "silent", 1);
 	setenv("MESA_NO_ERROR", "1", 1);
