@@ -507,12 +507,16 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
     if (!g_turnip_gipa) {
         ALOGE("Failed to get vkGetInstanceProcAddr from Turnip");
+		dlclose(g_turnip_handle);
+        g_turnip_handle = nullptr;
         goto cleanup;
     }
 
     g_turnip_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_turnip_handle, "vkGetDeviceProcAddr");
     if (!g_turnip_gdpa) {
         ALOGE("Failed to get vkGetDeviceProcAddr from Turnip");
+		dlclose(g_turnip_handle);
+        g_turnip_handle = nullptr;
         goto cleanup;
     }
 
@@ -551,10 +555,10 @@ static void global_atomic_init() {
     setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "true", 1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-	setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
+	setenv("MESA_SHADER_CACHE_DISABLE", "0", 1);
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 1);
 	setenv("MESA_DISK_CACHE_SINGLE_FILE", "1", 1);
-	setenv("MESA_DISK_CACHE_READ_ONLY", "false", 1);
+	setenv("MESA_DISK_CACHE_READ_ONLY", "0", 1);
     
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_DEBUG", "silent", 1);
