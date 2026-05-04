@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <dirent.h>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
@@ -485,6 +486,24 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     char cache_dir[512];
     snprintf(cache_dir, sizeof(cache_dir), "%s/turnip_shader_cache/", base_cache_path);
     mkdir(cache_dir, 0775);
+
+	DIR *dp = opendir(cache_dir);
+    if (dp == NULL) {
+        ALOGE("Failed to open cache directory: %s", cache_dir);
+    } else {
+        struct dirent *entry;
+        ALOGI("Scanning directory: %s", cache_dir);
+    
+        while ((entry = readdir(dp))) {
+            // Skip hidden/parent directories "." and ".."
+            if (entry->d_name[0] == '.') {
+               continue;
+            }
+            ALOGI("  Found: %s", entry->d_name);
+        }
+        closedir(dp);
+    }
+
 
     setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
 
