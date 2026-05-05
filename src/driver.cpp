@@ -465,6 +465,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     char* native_lib_dir = get_native_library_dir(env, context);
 
     char fixed_dir[512];
+	int ret = 0;
     snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
     __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", "Native Lib Dir: %s", fixed_dir);
     
@@ -531,7 +532,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
 	    adrenotools_set_turbo(true);
-	    int ret = setpriority(PRIO_PROCESS, 0, -20);
+	    ret = setpriority(PRIO_PROCESS, 0, -20);
         if (ret != 0) {
             ALOGI("setpriority to -20 failed (no root), trying -10");
             setpriority(PRIO_PROCESS, 0, -10); // usually allowed without root
