@@ -637,6 +637,16 @@ static void global_atomic_init() {
 
 void perform_init(JavaVM* vm) {
 	ALOGI("JNI_OnLoad: started");
+
+	cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(4, &mask);
+    CPU_SET(5, &mask);
+    CPU_SET(6, &mask);
+    CPU_SET(7, &mask);
+	
+    sched_setaffinity(0, sizeof(mask), &mask);
+	
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
