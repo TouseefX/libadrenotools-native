@@ -637,7 +637,7 @@ static void global_atomic_init() {
 
 void perform_init(JavaVM* vm) {
 	ALOGI("JNI_OnLoad: started");
-
+#ifdef OVERCLOCK
 	cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(4, &mask);
@@ -646,6 +646,7 @@ void perform_init(JavaVM* vm) {
     CPU_SET(7, &mask);
 	
     sched_setaffinity(0, sizeof(mask), &mask);
+#endif
 	
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
