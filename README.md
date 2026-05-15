@@ -28,7 +28,7 @@ Vulkan 1.3+ and driver must match your vulkan verison unless you're in the newer
 
 Adero 620+
 
-8GB of RAM (Recommended)
+8GB of RAM (Recommended) but not required only for video ram
 
 Please create an issue if support for anything else is desired.
 
