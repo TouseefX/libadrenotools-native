@@ -542,7 +542,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
 cleanup:
     env->ReleaseStringUTFChars(jPath, base_cache_path);
-	env->DeleteLocalRef(jCachePath);
     env->DeleteLocalRef(contextClass);
     env->DeleteLocalRef(cacheFileObj);
     env->DeleteLocalRef(fileClass);
