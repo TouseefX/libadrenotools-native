@@ -433,6 +433,17 @@ void applyTurnipOptimizations() {
 	}
 }
 
+bool my_caller_filter(const char *caller_path_name, void *arg) {
+    if (!caller_path_name) return false;
+	
+    return strstr(caller_path_name, "libvulkan.so") ||
+           strstr(caller_path_name, "libroblox.so") ||
+           strstr(caller_path_name, "libUE4.so")      ||
+           strstr(caller_path_name, "libUnreal.so")   ||
+           strstr(caller_path_name, "libunity.so")    ||
+           strstr(caller_path_name, "libmain.so");
+}
+
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     std::lock_guard<std::mutex> lock(g_init_mutex);
     if (g_turnip_handle != nullptr) {
@@ -504,12 +515,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	
     ALOGI("Installing dlopen hooks for Vulkan redirection...");
 
-    bytehook_hook_single("libvulkan.so",     "dlopen", (void*)hooked_dlopen, NULL, NULL);
-    bytehook_hook_single("libroblox.so",     "dlopen", (void*)hooked_dlopen, NULL, NULL);
-    bytehook_hook_single("libUE4.so",        "dlopen", (void*)hooked_dlopen, NULL, NULL);
-    bytehook_hook_single("libUnreal.so",     "dlopen", (void*)hooked_dlopen, NULL, NULL);
-    bytehook_hook_single("libunity.so",      "dlopen", (void*)hooked_dlopen, NULL, NULL);
-    bytehook_hook_single("libmain.so",       "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    bytehook_hook_partial(my_caller_filter, NULL, NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
 	
     shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
