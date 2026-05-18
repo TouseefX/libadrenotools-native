@@ -348,7 +348,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
     if (!filename || (uintptr_t)filename < 0x1000)
         return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
 
-    if (!strstr(filename, "vulkan") && !strstr(filename, "adreno"))
+    if (!safe_contains(filename, "vulkan") && !safe_contains(filename, "adreno"))
         return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
 
     if (g_in_hook)
