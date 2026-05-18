@@ -23,6 +23,7 @@
 #include <chrono>
 #include <pwd.h>
 #include <cstring>
+#include <cstdlib>
 #include <jni.h>
 #include <shadowhook.h>
 #include <atomic>
@@ -405,50 +406,57 @@ static char* get_native_library_dir(JNIEnv* env, jobject context) {
 }
 
 void applyTurnipOptimizations() {
-    void* libvulkan = dlopen("libvulkan.so", RTLD_NOW);
-    if (!libvulkan) return;
+    std::string gpuName = "";
 	
-    auto pfnCreateInstance = (PFN_vkCreateInstance)dlsym(libvulkan, "vkCreateInstance");
-    auto pfnEnumeratePhysicalDevices = (PFN_vkEnumeratePhysicalDevices)dlsym(libvulkan, "vkEnumeratePhysicalDevices");
-    auto pfnGetPhysicalDeviceProperties = (PFN_vkGetPhysicalDeviceProperties)dlsym(libvulkan, "vkGetPhysicalDeviceProperties");
-    auto pfnDestroyInstance = (PFN_vkDestroyInstance)dlsym(libvulkan, "vkDestroyInstance");
-
-    if (!pfnCreateInstance || !pfnEnumeratePhysicalDevices || !pfnGetPhysicalDeviceProperties) {
-        dlclose(libvulkan);
-        return;
+    std::ifstream kgslFile("/sys/class/kgsl/kgsl-3d0/gpu_model");
+    if (kgslFile.is_open()) {
+        std::getline(kgslFile, gpuName);
+        kgslFile.close();
+	}
+	
+    if (gpuName.empty()) {
+        std::ifstream dtFile("/proc/device-tree/model");
+        if (dtFile.is_open()) {
+            std::getline(dtFile, gpuName);
+            dtFile.close();
+		}
     }
 	
-    VkInstance tempInstance;
-    VkInstanceCreateInfo createInfo = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
-    if (pfnCreateInstance(&createInfo, nullptr, &tempInstance) == VK_SUCCESS) {
-        uint32_t count = 0;
-        pfnEnumeratePhysicalDevices(tempInstance, &count, nullptr);
-        if (count > 0) {
-            std::vector<VkPhysicalDevice> devices(count);
-            pfnEnumeratePhysicalDevices(tempInstance, &count, devices.data());
-
-            VkPhysicalDeviceProperties props;
-            pfnGetPhysicalDeviceProperties(devices[0], &props);
-            
-            std::string name(props.deviceName);
-            if (name.find("Adreno (TM) 7") != std::string::npos || 
-                name.find("Adreno (TM) 8") != std::string::npos) {
-				#ifdef OVERCLOCK
-				    setenv("TU_DEBUG", "noconform,hiprio,forcecb,noflushall,dynamic,unaligned_store,deck_emu", 1);
-				#else
-				    setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu", 1);
-				#endif
-            } else {
-                #ifdef OVERCLOCK
-				    setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
-				#else
-				    setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu,forcecb", 1);
-				#endif
-            }
+    if (gpuName.empty()) {
+        std::ifstream devTreeFile("/sys/firmware/devicetree/base/model");
+        if (devTreeFile.is_open()) {
+            std::getline(devTreeFile, gpuName);
+            devTreeFile.close();
         }
-        pfnDestroyInstance(tempInstance, nullptr);
     }
-    dlclose(libvulkan);
+	
+    if (gpuName.empty()) {
+        #ifdef OVERCLOCK
+            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
+        #else
+            setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu,forcecb", 1);
+        #endif
+		return;
+    }
+	
+    bool isAdreno7or8 = (gpuName.find("7") != std::string::npos) || 
+                        (gpuName.find("8") != std::string::npos);
+    
+    if (isAdreno7or8) {
+		AOGI("Applying Flags For Adreno 7/8");
+#ifdef OVERCLOCK
+		setenv("TU_DEBUG", "noconform,hiprio,forcecb,noflushall,dynamic,unaligned_store,deck_emu", 1);
+#else
+		setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu", 1);
+#endif
+	} else {
+		AOGI("Applying Flags For Adreno 6");
+#ifdef OVERCLOCK
+	   setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
+#else
+	   setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu,forcecb", 1);
+#endif
+	}
 }
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
