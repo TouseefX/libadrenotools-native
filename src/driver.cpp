@@ -504,7 +504,12 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	
     ALOGI("Installing dlopen hooks for Vulkan redirection...");
 
-    bytehook_hook_partial("libvulkan|libroblox|libUE4|libUnreal|libunity|libmain", "dlopen",  (void*)hooked_dlopen, NULL,  NULL);
+    bytehook_hook_single("libvulkan.so",     "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    bytehook_hook_single("libroblox.so",     "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    bytehook_hook_single("libUE4.so",        "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    bytehook_hook_single("libUnreal.so",     "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    bytehook_hook_single("libunity.so",      "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    bytehook_hook_single("libmain.so",       "dlopen", (void*)hooked_dlopen, NULL, NULL);
 	
     shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
