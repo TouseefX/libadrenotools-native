@@ -626,8 +626,6 @@ static void global_atomic_init() {
 
 void perform_init(JavaVM* vm) {
 	ALOGI("JNI_OnLoad: started");
-
-	init_bypass_ranges();
 	
 #ifdef OVERCLOCK
 	cpu_set_t mask;
