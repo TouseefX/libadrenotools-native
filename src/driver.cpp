@@ -626,8 +626,6 @@ static void global_atomic_init() {
 
 	applyTurnipOptimizations();
 
-	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(dlsym(RTLD_DEFAULT, "dlopen"));
-
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 	bytehook_init(BYTEHOOK_MODE_MANUAL, false);
 }
