@@ -471,14 +471,14 @@ void applyTurnipOptimizations() {
                         (gpuName.find("8") != std::string::npos);
     
     if (isAdreno7or8) {
-		AOGI("Applying Flags For Adreno 7/8");
+		ALOGI("Applying Flags For Adreno 7/8");
 #ifdef OVERCLOCK
 		setenv("TU_DEBUG", "noconform,hiprio,forcecb,noflushall,dynamic,unaligned_store,deck_emu", 1);
 #else
 		setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu", 1);
 #endif
 	} else {
-		AOGI("Applying Flags For Adreno 6");
+		ALOGI("Applying Flags For Adreno 6");
 #ifdef OVERCLOCK
 	   setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
 #else
