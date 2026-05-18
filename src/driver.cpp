@@ -363,6 +363,13 @@ static void init_bypass_ranges(bool force_recheck = false) {
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
 
+	if (filename && 
+        (safe_contains(filename, "webviewchromium") || 
+         safe_contains(filename, "chromium") || 
+         safe_contains(filename, "webview"))) {
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+	}
+
     // Lazy + safety init
     if (g_bypass_init_state.load(std::memory_order_acquire) != 2) {
         init_bypass_ranges();
