@@ -44,9 +44,6 @@
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
 
-static PFN_vkGetInstanceProcAddr gipa_stub = nullptr;
-static PFN_vkGetDeviceProcAddr   gdpa_stub = nullptr;
-
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
@@ -275,65 +272,58 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
-static void* (*real_dlopen)(const char*, int) = nullptr;
-struct AddrRange { uintptr_t start, end; };
 
-static AddrRange        bypass_ranges[64];
-static std::atomic<int> bypass_ranges_count{0};   // written once, read many
-static std::atomic<int> g_init_state{0};           // 0=uninit 1=running 2=done
+struct AddrRange { uintptr_t start, end; };
+static AddrRange        g_bypass_ranges[64];
+static std::atomic<int> g_bypass_ranges_count{0};
+static std::atomic<int> g_bypass_init_state{0};
+
 static thread_local bool g_in_hook = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
+	SHADOWHOOK_STACK_SCOPE();
     if (g_turnip_gipa) {
         auto func = g_turnip_gipa(instance, pName);
         if (func) return func;
     }
-    return gipa_stub(instance, pName);
+    return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
 }
 
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+	SHADOWHOOK_STACK_SCOPE();
     if (g_turnip_gdpa) {
         auto func = g_turnip_gdpa(device, pName);
         if (func) return func;
     }
-    if (gdpa_stub)
-        return gdpa_stub(device, pName);
-    return nullptr;
+    return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
 }
 
-void init_caller_check() {
-    if (g_init_state.load(std::memory_order_acquire) == 2)
-        return;
-
+static void init_bypass_ranges() {
     int expected = 0;
-    if (!g_init_state.compare_exchange_strong(expected, 1,
+    if (!g_bypass_init_state.compare_exchange_strong(expected, 1,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
-        while (g_init_state.load(std::memory_order_acquire) != 2) {
+        while (g_bypass_init_state.load(std::memory_order_acquire) != 2)
             __asm__ __volatile__("yield" ::: "memory");
-        }
         return;
     }
-	
-    FILE* f = fopen("/proc/self/maps", "r");
-    int local_count = 0; // Use as local
 
+    int count = 0;
+    FILE* f = fopen("/proc/self/maps", "r");
     if (f) {
         char line[512];
-        // Protect against overflow (limit to 64)
-        while (local_count < 64 && fgets(line, sizeof(line), f)) {
+        while (count < 64 && fgets(line, sizeof(line), f)) {
             if (strstr(line, "libadrenotools.so") || strstr(line, "libhook_impl.so")) {
                 uintptr_t s, e;
-                if (sscanf(line, "%lx-%lx", &s, &e) == 2) {
-                    bypass_ranges[local_count++] = {s, e};
-                }
+                if (sscanf(line, "%lx-%lx", &s, &e) == 2)
+                    g_bypass_ranges[count++] = {s, e};
             }
         }
         fclose(f);
-		
-        bypass_ranges_count.store(local_count, std::memory_order_release); // now we store
     }
-	
-    g_init_state.store(2, std::memory_order_release);
+
+    g_bypass_ranges_count.store(count, std::memory_order_release);
+    g_bypass_init_state.store(2, std::memory_order_release);
+    ALOGI("init_bypass_ranges: found %d range(s)", count);
 }
 
 static bool safe_contains(const char* haystack, const char* needle) {
@@ -350,34 +340,39 @@ static bool safe_contains(const char* haystack, const char* needle) {
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
-    if (g_init_state.load(std::memory_order_acquire) != 2) return real_dlopen(filename, flags);
-    if (!filename || (uintptr_t)filename < 0x1000) return real_dlopen(filename, flags);
-	
-    if (!(safe_contains(filename, "vulkan") || safe_contains(filename, "adreno"))) {
-        return real_dlopen(filename, flags);
-    }
-	
-    if (g_in_hook) return real_dlopen(filename, flags);
+    BYTEHOOK_STACK_SCOPE();
+
+    if (g_bypass_init_state.load(std::memory_order_acquire) != 2)
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+
+    if (!filename || (uintptr_t)filename < 0x1000)
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+
+    if (!strstr(filename, "vulkan") && !strstr(filename, "adreno"))
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+
+    if (g_in_hook)
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+
     g_in_hook = true;
 
-    BYTEHOOK_STACK_SCOPE();
     const uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
-	
-    const int count = bypass_ranges_count.load(std::memory_order_acquire);
+    const int count = g_bypass_ranges_count.load(std::memory_order_acquire);
     for (int i = 0; i < count; ++i) {
-        if (caller >= bypass_ranges[i].start && caller < bypass_ranges[i].end) {
+        if (caller >= g_bypass_ranges[i].start && caller < g_bypass_ranges[i].end) {
             g_in_hook = false;
-            return real_dlopen(filename, flags);
+            return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
         }
     }
-	
+
     if (g_turnip_handle) {
+        ALOGI("hooked_dlopen: redirecting '%s' -> Turnip", filename);
         g_in_hook = false;
         return g_turnip_handle;
     }
-	
+
     g_in_hook = false;
-    return real_dlopen(filename, flags);
+    return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
@@ -398,6 +393,7 @@ static char* get_native_library_dir(JNIEnv* env, jobject context) {
                 native_libdir = strdup(path_chars);
                 env->ReleaseStringUTFChars(jPath, path_chars);
             }
+			env->DeleteLocalRef(jPath);
         }
 
         env->DeleteLocalRef(contextClass);
@@ -526,8 +522,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
 	bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
 
-    gipa_stub = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    gdpa_stub = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+    shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 	
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
@@ -546,6 +542,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
 cleanup:
     env->ReleaseStringUTFChars(jPath, base_cache_path);
+	env->DeleteLocalRef(jCachePath);
     env->DeleteLocalRef(contextClass);
     env->DeleteLocalRef(cacheFileObj);
     env->DeleteLocalRef(fileClass);
@@ -657,6 +654,8 @@ void perform_init(JavaVM* vm) {
     static jmethodID currentAppMid = env->GetStaticMethodID(activityThreadCls, "currentApplication", "()Landroid/app/Application;");
 
     jobject app = env->CallStaticObjectMethod(activityThreadCls, currentAppMid);
+
+	init_bypass_ranges();
 
     if (app) {
         ALOGI("JNI_OnLoad: Initializing Turnip immediately");
