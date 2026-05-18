@@ -274,11 +274,6 @@ static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 
-struct AddrRange { uintptr_t start, end; };
-static AddrRange        g_bypass_ranges[64];
-static std::atomic<int> g_bypass_ranges_count{0};
-static std::atomic<int> g_bypass_init_state{0};
-
 static thread_local bool g_in_hook = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
@@ -314,98 +309,41 @@ static bool safe_contains(const char* haystack, const char* needle) {
     return false;
 }
 
-// Small guard to prevent excessive rechecks
-static std::atomic<int> g_recheck_count{0};
-static constexpr int MAX_RECHECKS = 4;
-
-static void init_bypass_ranges(bool force_recheck = false) {
-    int expected = 0;
-
-    if (!force_recheck) {
-        if (!g_bypass_init_state.compare_exchange_strong(expected, 1,
-                std::memory_order_acq_rel, std::memory_order_acquire)) {
-            while (g_bypass_init_state.load(std::memory_order_acquire) != 2)
-                __asm__ __volatile__("yield" ::: "memory");
-            return;
-        }
-    } else {
-        if (g_recheck_count.fetch_add(1, std::memory_order_relaxed) >= MAX_RECHECKS) {
-            ALOGW("init_bypass_ranges: too many rechecks (%d), skipping", 
-                  g_recheck_count.load(std::memory_order_relaxed));
-            return;
-        }
-        g_bypass_init_state.store(1, std::memory_order_release);
-    }
-
-    int count = 0;
-    FILE* f = fopen("/proc/self/maps", "r");
-    if (f) {
-        char line[512];
-        while (count < 128 && fgets(line, sizeof(line), f)) {   // increased limit
-            if (safe_contains(line, "libadrenotools.so") || 
-                safe_contains(line, "libhook_impl.so")) {
-                uintptr_t s = 0, e = 0;
-                if (sscanf(line, "%lx-%lx", &s, &e) == 2 && s < e) {
-                    g_bypass_ranges[count++] = {s, e};
-                }
-            }
-        }
-        fclose(f);
-    }
-
-    g_bypass_ranges_count.store(count, std::memory_order_release);
-    g_bypass_init_state.store(2, std::memory_order_release);
-
-    ALOGI("init_bypass_ranges: found %d range(s) %s", 
-          count, force_recheck ? "(recheck)" : "");
-}
-
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
-
-	if (safe_contains(filename, "webviewchromium") ||
-        safe_contains(filename, "chromium") ||
-        safe_contains(filename, "hwui") ||           // ← Important for this crash
-        safe_contains(filename, "libEGL") ||
-        safe_contains(filename, "libGLES")) {
-        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
-	}
-
-    // Lazy + safety init
-    if (g_bypass_init_state.load(std::memory_order_acquire) != 2) {
-        init_bypass_ranges();
-    }
-
-    if (!filename || (uintptr_t)filename < 0x1000)
-        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
-
-    if (!safe_contains(filename, "vulkan") && !safe_contains(filename, "adreno") && !safe_contains(filename, "log"))
-        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
-
-    // Force recheck only if we still missed the ranges
-    if (g_bypass_ranges_count.load(std::memory_order_acquire) == 0) {
-        init_bypass_ranges(true);
-    }
 
     if (g_in_hook)
         return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
 
     g_in_hook = true;
 
-    const uintptr_t caller = (uintptr_t)BYTEHOOK_RETURN_ADDRESS();
-    const int count = g_bypass_ranges_count.load(std::memory_order_acquire);
-
-    for (int i = 0; i < count; ++i) {
-        if (caller >= g_bypass_ranges[i].start && caller < g_bypass_ranges[i].end) {
-            g_in_hook = false;
-            return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
-        }
-    }
-
-    if (g_turnip_handle) {
-        ALOGI("hooked_dlopen: redirecting '%s' -> Turnip", filename);
+    if (!filename || (uintptr_t)filename < 0x1000) {
         g_in_hook = false;
-        return g_turnip_handle;
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+    }
+	
+    bool is_relevant = safe_contains(filename, "vulkan") || 
+                       safe_contains(filename, "adreno");
+
+    if (!is_relevant) {
+        g_in_hook = false;
+        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+    }
+	
+    if (g_turnip_handle) {
+        if ( safe_contains(filename, "vulkan_adreno") || 
+            safe_contains(filename, "adreno") || 
+            strcmp(filename, "libvulkan.so") == 0) {
+
+            static bool logged_once = false;
+            if (!logged_once) {
+                logged_once = true;
+                ALOGI("hooked_dlopen: redirecting '%s' -> Turnip", filename);
+            }
+
+            g_in_hook = false;
+            return g_turnip_handle;
+        }
     }
 
     g_in_hook = false;
@@ -563,9 +501,11 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     }
 
     ALOGI("Turnip loaded, setting up hooks...");
+	
+    ALOGI("Installing dlopen hooks for Vulkan redirection...");
 
-	bytehook_hook_all(NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
-
+    bytehook_hook_partial("libvulkan|libroblox|libUE4|libUnreal|libunity|libmain", "dlopen",  (void*)hooked_dlopen, NULL,  NULL);
+	
     shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
     shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 	
