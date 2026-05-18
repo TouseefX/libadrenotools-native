@@ -363,10 +363,11 @@ static void init_bypass_ranges(bool force_recheck = false) {
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
 
-	if (filename && 
-        (safe_contains(filename, "webviewchromium") || 
-         safe_contains(filename, "chromium") || 
-         safe_contains(filename, "webview"))) {
+	if (safe_contains(filename, "webviewchromium") ||
+        safe_contains(filename, "chromium") ||
+        safe_contains(filename, "hwui") ||           // ← Important for this crash
+        safe_contains(filename, "libEGL") ||
+        safe_contains(filename, "libGLES")) {
         return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
 	}
 
