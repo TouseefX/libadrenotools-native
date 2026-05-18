@@ -273,7 +273,7 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
-
+static void* (*real_dlopen)(const char*, int) = nullptr;
 static thread_local bool g_in_hook = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
@@ -313,13 +313,13 @@ static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
 
     if (g_in_hook)
-        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+        return real_dlopen(filename, flags);
 
     g_in_hook = true;
 
     if (!filename || (uintptr_t)filename < 0x1000) {
         g_in_hook = false;
-        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+        return real_dlopen(filename, flags);
     }
 	
     bool is_relevant = safe_contains(filename, "vulkan") || 
@@ -327,7 +327,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
 
     if (!is_relevant) {
         g_in_hook = false;
-        return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+        return real_dlopen(filename, flags);
     }
 	
     if (g_turnip_handle) {
@@ -347,7 +347,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
     }
 
     g_in_hook = false;
-    return BYTEHOOK_CALL_PREV(hooked_dlopen, filename, flags);
+    return real_dlopen(filename, flags);
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
@@ -619,6 +619,8 @@ static void global_atomic_init() {
     }
 
 	applyTurnipOptimizations();
+
+	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(dlsym(RTLD_DEFAULT, "dlopen"));
 
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 	bytehook_init(BYTEHOOK_MODE_MANUAL, false);
