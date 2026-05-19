@@ -7,6 +7,11 @@ on:
         required: true
         type: boolean
         default: false
+      enable_dlopen_hook:
+        description: 'Enables Dlopen hook makes fps and responses better at the cost of crashes'
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -28,6 +33,7 @@ jobs:
           git submodule update --init --recursive
           mkdir build && cd build
           OVERCLOCK_FLAG=${{ github.event.inputs.enable_overclock == 'true' && 'ON' || 'OFF' }}
+          DLOPEN_HOOK_FLAG=${{ github.event.inputs.enable_dlopen_hook == 'true' && 'ON' || 'OFF' }}
           
           cmake .. -Wno-dev \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -37,7 +43,8 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -Dlinkernsbypass_BUILD_SHARED=ON \
-            -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG
+            -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG \
+            -DDLOPEN_HOOK=$DLOPEN_HOOK_FLAG
           
           make -j$(nproc)
           cd ..
