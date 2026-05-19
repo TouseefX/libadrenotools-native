@@ -273,8 +273,11 @@ static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static JavaVM* g_java_vm = nullptr;
+
+#ifdef DLOPEN_HOOK
 static void* (*real_dlopen)(const char*, int) = nullptr;
 static thread_local bool g_in_hook = false;
+#endif
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     SHADOWHOOK_STACK_SCOPE();
@@ -315,7 +318,7 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
 
     return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
 }
-
+#ifdef DLOPEN_HOOK
 static bool is_pointer_valid(const void* ptr, size_t len) {
     if (!ptr) return false;
 	
@@ -379,7 +382,7 @@ static void* hooked_dlopen(const char* filename, int flags) {
     g_in_hook = false;
     return result;
 }
-
+#endif
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
     char* native_libdir = nullptr;
 
@@ -462,7 +465,7 @@ void applyTurnipOptimizations() {
 #endif
 	}
 }
-
+#ifdef DLOPEN_HOOK
 bool my_caller_filter(const char *caller_path_name, void *arg) {
     if (!caller_path_name) return false;
 	
@@ -473,32 +476,39 @@ bool my_caller_filter(const char *caller_path_name, void *arg) {
            strstr(caller_path_name, "libunity.so")    ||
            strstr(caller_path_name, "libmain.so");
 }
-
+#endif
 static void* g_shadow_stub_gipa = nullptr;
 static void* g_shadow_stub_gdpa = nullptr;
+#ifdef DLOPEN_HOOK
 static bytehook_stub_t g_bytehook_stub_dlopen = nullptr;
+#endif
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     if (g_turnip_handle != nullptr) {
         ALOGI("init_turnip_driver: already initialized, refreshing hooks");
-        
+#ifdef DLOPEN_HOOK
          if (g_bytehook_stub_dlopen) {
             bytehook_unhook(g_bytehook_stub_dlopen);
             g_bytehook_stub_dlopen = nullptr;
         }
+#endif
         if (g_shadow_stub_gipa) {
             shadowhook_unhook(g_shadow_stub_gipa);
             g_shadow_stub_gipa = nullptr;
         }
+		
         if (g_shadow_stub_gdpa) {
             shadowhook_unhook(g_shadow_stub_gdpa);
             g_shadow_stub_gdpa = nullptr;
         }
-        
+		
+#ifdef DLOPEN_HOOK
         g_bytehook_stub_dlopen = bytehook_hook_partial(my_caller_filter, NULL, NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
+#endif
         g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
         g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
-        
+
+
         return;
     }
 
@@ -563,11 +573,12 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     }
 
     ALOGI("Turnip loaded, setting up hooks...");
-	
+#ifdef DLOPEN_HOOK
     ALOGI("Installing dlopen hooks for Vulkan redirection...");
 
     g_bytehook_stub_dlopen = bytehook_hook_partial(my_caller_filter, NULL, NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
-    
+#endif
+
     ALOGI("Installing GIPA And GPIA hooks");
     
     g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
@@ -683,7 +694,9 @@ static void global_atomic_init() {
 
 	applyTurnipOptimizations();
 
+#ifdef DLOPEN_HOOK
 	real_dlopen = reinterpret_cast<decltype(real_dlopen)>(dlsym(RTLD_DEFAULT, "dlopen"));
+#endif
 
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 	bytehook_init(BYTEHOOK_MODE_MANUAL, false);
