@@ -274,7 +274,7 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
-static _Atomic int g_in_hook = 0;
+static thread_local bool g_in_hook = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     SHADOWHOOK_STACK_SCOPE();
@@ -350,36 +350,34 @@ static bool safe_contains(const char* haystack, const char* needle) {
 
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
-	
-    int expected = 0;
-    if (!atomic_compare_exchange_strong(&g_in_hook, &expected, 1))
-        return real_dlopen(filename, flags);
-	
-    if (!filename) {
-        atomic_store(&g_in_hook, 0);
-        return real_dlopen(filename, flags);
-    }
-	
-    bool is_relevant = safe_contains(filename, "vulkan") || 
-                       safe_contains(filename, "adreno");
 
-    if (!is_relevant) {
-        atomic_store(&g_in_hook, 0);
+    if (g_in_hook)
         return real_dlopen(filename, flags);
-    }
 
-    if (g_turnip_handle) {
-        if (safe_contains(filename, "vulkan_adreno") || 
-            safe_contains(filename, "adreno") || 
-            safe_contains(filename, "libvulkan.so")) {
+    g_in_hook = true;
 
-            atomic_store(&g_in_hook, 0);
-            return g_turnip_handle;
+    void* result = [&]() -> void* {
+        if (!filename)
+            return real_dlopen(filename, flags);
+
+        bool is_relevant = safe_contains(filename, "vulkan") ||
+                           safe_contains(filename, "adreno");
+
+        if (!is_relevant)
+            return real_dlopen(filename, flags);
+
+        if (g_turnip_handle) {
+            if (safe_contains(filename, "vulkan_adreno") ||
+                safe_contains(filename, "adreno")        ||
+                safe_contains(filename, "libvulkan.so"))
+                return g_turnip_handle;
         }
-    }
 
-    atomic_store(&g_in_hook, 0);
-    return real_dlopen(filename, flags);
+        return real_dlopen(filename, flags);
+    }();
+
+    g_in_hook = false;
+    return result;
 }
 
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
