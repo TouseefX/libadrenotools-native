@@ -27,6 +27,7 @@
 #include <jni.h>
 #include <shadowhook.h>
 #include <atomic>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <vector>
 #include <mutex>
@@ -40,10 +41,13 @@
 #include <cstring>
 #include <cstdint>
 #include <dirent.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
+#define MAX_FILENAME_SCAN 512
 
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
@@ -272,7 +276,7 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
-static thread_local bool g_in_hook = false;
+static _Atomic int g_in_hook = 0;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     SHADOWHOOK_STACK_SCOPE();
@@ -314,15 +318,32 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
 }
 
-static bool safe_contains(const char* haystack, const char* needle) {
-    if (!haystack || !needle || !*needle) return false;
+static bool is_pointer_valid(const void* ptr, size_t len) {
+    if (!ptr) return false;
+	
+    static int fd = -1;
+    if (fd < 0) fd = open("/dev/null", O_WRONLY);
+    if (fd < 0) return false;
     
-    for (const char* h = haystack; *h; ++h) {
+    return write(fd, ptr, len) >= 0;
+}
+
+static bool safe_contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*needle) 
+        return false;
+	
+    if (!is_pointer_valid(haystack, 1))
+        return false;
+    
+    size_t count = 0;
+    for (const char* h = haystack; *h && count < MAX_FILENAME_SCAN; ++h, ++count) {
         const char* h_part = h;
         const char* n_part = needle;
-        while (*h_part && *n_part && *h_part == *n_part) {
+        size_t inner = 0;
+        while (*h_part && *n_part && *h_part == *n_part && inner < 64) {
             h_part++;
             n_part++;
+            inner++;
         }
         if (!*n_part) return true;
     }
@@ -331,14 +352,13 @@ static bool safe_contains(const char* haystack, const char* needle) {
 
 static void* hooked_dlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
-
-    if (g_in_hook)
+	
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&g_in_hook, &expected, 1))
         return real_dlopen(filename, flags);
-
-    g_in_hook = true;
-
-    if (!filename || (uintptr_t)filename < 0x1000) {
-        g_in_hook = false;
+	
+    if (!filename) {
+        atomic_store(&g_in_hook, 0);
         return real_dlopen(filename, flags);
     }
 	
@@ -346,27 +366,21 @@ static void* hooked_dlopen(const char* filename, int flags) {
                        safe_contains(filename, "adreno");
 
     if (!is_relevant) {
-        g_in_hook = false;
+        atomic_store(&g_in_hook, 0);
         return real_dlopen(filename, flags);
     }
-	
+
     if (g_turnip_handle) {
-        if ( safe_contains(filename, "vulkan_adreno") || 
+        if (safe_contains(filename, "vulkan_adreno") || 
             safe_contains(filename, "adreno") || 
-            strcmp(filename, "libvulkan.so") == 0) {
+            safe_contains(filename, "libvulkan.so")) {
 
-            static bool logged_once = false;
-            if (!logged_once) {
-                logged_once = true;
-                ALOGI("hooked_dlopen: redirecting '%s' -> Turnip", filename);
-            }
-
-            g_in_hook = false;
+            atomic_store(&g_in_hook, 0);
             return g_turnip_handle;
         }
     }
 
-    g_in_hook = false;
+    atomic_store(&g_in_hook, 0);
     return real_dlopen(filename, flags);
 }
 
