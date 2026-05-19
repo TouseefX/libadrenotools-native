@@ -267,30 +267,50 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
     }
 }
 
-static std::mutex g_init_mutex;
 static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
-static std::once_flag g_init_flag;
 static JavaVM* g_java_vm = nullptr;
 static void* (*real_dlopen)(const char*, int) = nullptr;
 static thread_local bool g_in_hook = false;
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-	SHADOWHOOK_STACK_SCOPE();
-    if (g_turnip_gipa) {
-        auto func = g_turnip_gipa(instance, pName);
-        if (func) return func;
+    SHADOWHOOK_STACK_SCOPE();
+    
+    if (!pName) {
+        return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
     }
+
+    if (g_turnip_gipa) {
+        if (instance == VK_NULL_HANDLE) {
+            if (strcmp(pName, "vkCreateInstance") == 0 || 
+                strcmp(pName, "vkEnumerateInstanceExtensionProperties") == 0 ||
+                strcmp(pName, "vkEnumerateInstanceLayerProperties") == 0) {
+                
+                auto func = g_turnip_gipa(VK_NULL_HANDLE, pName);
+                if (func) return func;
+            }
+        } else {
+            auto func = g_turnip_gipa(instance, pName);
+            if (func) return func;
+        }
+    }
+
     return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
 }
 
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-	SHADOWHOOK_STACK_SCOPE();
+    SHADOWHOOK_STACK_SCOPE();
+    
+    if (!pName) {
+        return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
+    }
+
     if (g_turnip_gdpa) {
         auto func = g_turnip_gdpa(device, pName);
         if (func) return func;
     }
+
     return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
 }
 
@@ -444,10 +464,31 @@ bool my_caller_filter(const char *caller_path_name, void *arg) {
            strstr(caller_path_name, "libmain.so");
 }
 
+static void* g_shadow_stub_gipa = nullptr;
+static void* g_shadow_stub_gdpa = nullptr;
+static bytehook_stub_t g_bytehook_stub_dlopen = nullptr;
+
 static void init_turnip_driver(JNIEnv* env, jobject context) {
-    std::lock_guard<std::mutex> lock(g_init_mutex);
     if (g_turnip_handle != nullptr) {
-        ALOGI("init_turnip_driver: already initialized, skipping");
+        ALOGI("init_turnip_driver: already initialized, refreshing hooks");
+        
+         if (g_bytehook_stub_dlopen) {
+            bytehook_unhook(g_bytehook_stub_dlopen);
+            g_bytehook_stub_dlopen = nullptr;
+        }
+        if (g_shadow_stub_gipa) {
+            shadowhook_unhook(g_shadow_stub_gipa);
+            g_shadow_stub_gipa = nullptr;
+        }
+        if (g_shadow_stub_gdpa) {
+            shadowhook_unhook(g_shadow_stub_gdpa);
+            g_shadow_stub_gdpa = nullptr;
+        }
+        
+        g_bytehook_stub_dlopen = bytehook_hook_partial(my_caller_filter, NULL, NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
+        g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+        
         return;
     }
 
@@ -515,10 +556,12 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 	
     ALOGI("Installing dlopen hooks for Vulkan redirection...");
 
-    bytehook_hook_partial(my_caller_filter, NULL, NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
-	
-    shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+    g_bytehook_stub_dlopen = bytehook_hook_partial(my_caller_filter, NULL, NULL, "dlopen", (void*)hooked_dlopen, NULL, NULL);
+    
+    ALOGI("Installing GIPA And GPIA hooks");
+    
+    g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 	
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
@@ -545,6 +588,16 @@ cleanup:
 
 __attribute__((constructor))
 static void global_atomic_init() {
+#ifdef OVERCLOCK
+	cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(4, &mask);
+    CPU_SET(5, &mask);
+    CPU_SET(6, &mask);
+    CPU_SET(7, &mask);
+	
+    sched_setaffinity(0, sizeof(mask), &mask);
+#endif
     setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1", 1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
@@ -629,17 +682,6 @@ static void global_atomic_init() {
 void perform_init(JavaVM* vm) {
 	ALOGI("JNI_OnLoad: started");
 	
-#ifdef OVERCLOCK
-	cpu_set_t mask;
-    CPU_ZERO(&mask);
-    CPU_SET(4, &mask);
-    CPU_SET(5, &mask);
-    CPU_SET(6, &mask);
-    CPU_SET(7, &mask);
-	
-    sched_setaffinity(0, sizeof(mask), &mask);
-#endif
-	
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
@@ -678,6 +720,6 @@ void perform_init(JavaVM* vm) {
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     g_java_vm = vm;
-    std::call_once(g_init_flag, perform_init, vm);
+    perform_init(vm);
     return JNI_VERSION_1_6;
 }
