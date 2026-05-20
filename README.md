@@ -42,7 +42,7 @@ And Freedeno Drivers
 
 #### Is there an example project?
 
-There is a simple bare-bones project [AdrenoToolsTest](https://github.com/darksylinc/AdrenoToolsTest) demonstrating how to get libadrenotools working.
+There is a simple bare-bones project [AdrenoToolsTest](https://github.com/auto21011/AdrenoToolsTest) demonstrating how to get libadrenotools working.
 
 #### How do I use this to update the drivers on my phone? Where's the apk?
 
