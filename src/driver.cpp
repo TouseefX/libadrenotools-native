@@ -280,43 +280,13 @@ static thread_local bool g_in_hook = false;
 #endif
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-    SHADOWHOOK_STACK_SCOPE();
-    
-    if (!pName) {
-        return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
-    }
-
-    if (g_turnip_gipa) {
-        if (instance == VK_NULL_HANDLE) {
-            if (strcmp(pName, "vkCreateInstance") == 0 || 
-                strcmp(pName, "vkEnumerateInstanceExtensionProperties") == 0 ||
-                strcmp(pName, "vkEnumerateInstanceLayerProperties") == 0) {
-                
-                auto func = g_turnip_gipa(VK_NULL_HANDLE, pName);
-                if (func) return func;
-            }
-        } else {
-            auto func = g_turnip_gipa(instance, pName);
-            if (func) return func;
-        }
-    }
-
-    return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
+    auto func = g_turnip_gipa(instance, pName);
+    return func ? func : g_shadow_stub_gipa(instance, pName);
 }
 
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-    SHADOWHOOK_STACK_SCOPE();
-    
-    if (!pName) {
-        return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
-    }
-
-    if (g_turnip_gdpa) {
-        auto func = g_turnip_gdpa(device, pName);
-        if (func) return func;
-    }
-
-    return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
+    auto func = g_turnip_gdpa(device, pName);
+    return func ? func : g_shadow_stub_gdpa(device, pName);
 }
 #ifdef DLOPEN_HOOK
 static bool is_pointer_valid(const void* ptr, size_t len) {
@@ -352,8 +322,6 @@ static bool safe_contains(const char* haystack, const char* needle) {
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-
     if (g_in_hook)
         return real_dlopen(filename, flags);
 
@@ -581,8 +549,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     ALOGI("Installing GIPA And GPIA hooks");
     
-    g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+    g_shadow_stub_gipa = (PFN_vkGetInstanceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    g_shadow_stub_gdpa = (PFN_vkGetDeviceProcAddr)shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
 	
 	#ifdef OVERCLOCK
 	    ALOGI("Enabling Overclock make sure you have a fan cooler");
