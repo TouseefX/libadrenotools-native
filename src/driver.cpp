@@ -280,13 +280,11 @@ static thread_local bool g_in_hook = false;
 #endif
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-    auto func = g_turnip_gipa(instance, pName);
-    return func ? func : g_shadow_stub_gipa(instance, pName);
+    return g_turnip_gipa(instance, pName);
 }
 
 static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-    auto func = g_turnip_gdpa(device, pName);
-    return func ? func : g_shadow_stub_gdpa(device, pName);
+    return g_turnip_gdpa(device, pName);
 }
 #ifdef DLOPEN_HOOK
 static bool is_pointer_valid(const void* ptr, size_t len) {
