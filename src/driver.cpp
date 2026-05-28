@@ -287,63 +287,50 @@ static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char
     return g_turnip_gdpa(device, pName);
 }
 #ifdef DLOPEN_HOOK
-static bool is_pointer_valid(const void* ptr, size_t len) {
-    if (!ptr) return false;
-	
-    static int fd = -1;
-    if (fd < 0) fd = open("/dev/null", O_WRONLY);
-    if (fd < 0) return false;
-    
-    return write(fd, ptr, len) >= 0;
-}
-
 static bool safe_contains(const char* haystack, const char* needle) {
     if (!haystack || !needle || !*needle) 
         return false;
-	
-    if (!is_pointer_valid(haystack, 1))
-        return false;
     
     size_t count = 0;
-    for (const char* h = haystack; *h && count < MAX_FILENAME_SCAN; ++h, ++count) {
-        const char* h_part = h;
-        const char* n_part = needle;
-        size_t inner = 0;
-        while (*h_part && *n_part && *h_part == *n_part && inner < 64) {
-            h_part++;
-            n_part++;
-            inner++;
+    while (haystack[count] != '\0' && count < MAX_FILENAME_SCAN) {
+        size_t i = 0;
+        while (haystack[count + i] == needle[i] && needle[i] != '\0' && i < 64) {
+            i++;
         }
-        if (!*n_part) return true;
+        if (needle[i] == '\0') {
+            return true;
+        }
+        count++;
     }
     return false;
 }
 
 static void* hooked_dlopen(const char* filename, int flags) {
-    if (g_in_hook)
+    if (g_in_hook) {
         return real_dlopen(filename, flags);
+    }
+
+    if (!filename) {
+        return real_dlopen(filename, flags);
+    }
 
     g_in_hook = true;
+	
+    void* result = NULL;
+    bool is_relevant = safe_contains(filename, "vulkan") ||
+                       safe_contains(filename, "adreno");
 
-    void* result = [&]() -> void* {
-        if (!filename)
-            return real_dlopen(filename, flags);
-
-        bool is_relevant = safe_contains(filename, "vulkan") ||
-                           safe_contains(filename, "adreno");
-
-        if (!is_relevant)
-            return real_dlopen(filename, flags);
-
-        if (g_turnip_handle) {
-            if (safe_contains(filename, "vulkan_adreno") ||
-                safe_contains(filename, "adreno")        ||
-                safe_contains(filename, "libvulkan.so"))
-                return g_turnip_handle;
+    if (is_relevant && g_turnip_handle) {
+        if (safe_contains(filename, "vulkan_adreno") ||
+            safe_contains(filename, "libvulkan.so")) {
+            
+            result = g_turnip_handle;
         }
-
-        return real_dlopen(filename, flags);
-    }();
+    }
+	
+    if (result == NULL) {
+        result = real_dlopen(filename, flags);
+    }
 
     g_in_hook = false;
     return result;
@@ -586,16 +573,6 @@ cleanup:
 
 __attribute__((constructor))
 static void global_atomic_init() {
-#ifdef OVERCLOCK
-	cpu_set_t mask;
-    CPU_ZERO(&mask);
-    CPU_SET(4, &mask);
-    CPU_SET(5, &mask);
-    CPU_SET(6, &mask);
-    CPU_SET(7, &mask);
-	
-    sched_setaffinity(0, sizeof(mask), &mask);
-#endif
     setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1", 1);
 	setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS", "1", 1);
