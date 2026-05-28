@@ -405,29 +405,40 @@ void applyTurnipOptimizations() {
 	
     if (gpuName.empty()) {
         #ifdef OVERCLOCK
-            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
+            setenv("TU_DEBUG", "noconform,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
         #else
-            setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu,forcecb", 1);
+            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu,forcecb", 1);
         #endif
 		return;
     }
 	
-    bool isAdreno7or8 = (gpuName.find("7") != std::string::npos) || 
-                        (gpuName.find("8") != std::string::npos);
+    char firstDigit = (!gpuName.empty()) ? gpuName[0] : '0';
+
+    bool isAdreno8 = (firstDigit == '8');
+    bool isAdreno7 = (firstDigit == '7');
     
-    if (isAdreno7or8) {
-		ALOGI("Applying Flags For Adreno 7/8");
+    if (isAdreno8) {
+		ALOGI("Applying Flags For Adreno 8 (forcing Sssmem to prevent page faults)");
+		setenv("tu_override_uncached_as_cache_coherent", "true", 1);
 #ifdef OVERCLOCK
-		setenv("TU_DEBUG", "noconform,hiprio,forcecb,noflushall,dynamic,unaligned_store,deck_emu", 1);
+		setenv("TU_DEBUG", "noconform,sysmem,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
 #else
-		setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu", 1);
+		setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
+#endif
+	} else if (isAdreno7) {
+		ALOGI("Applying Flags For Adreno 7 (Uses Autotuner)");
+		setenv("tu_override_uncached_as_cache_coherent", "true", 1);
+#ifdef OVERCLOCK
+		setenv("TU_DEBUG", "noconform,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
+#else
+		setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
 #endif
 	} else {
-		ALOGI("Applying Flags For Adreno 6");
+		ALOGI("Applying Flags For Adreno 6 (Using Sysmem for Stability)");
 #ifdef OVERCLOCK
-	   setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
+		setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,unaligned_store,deck_emu", 1);
 #else
-	   setenv("TU_DEBUG", "noconform,noflushall,dynamic,deck_emu,forcecb", 1);
+		setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
 #endif
 	}
 }
@@ -587,6 +598,7 @@ static void global_atomic_init() {
 #endif
     setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1", 1);
+	setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS", "1", 1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
 	setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 1);
@@ -596,17 +608,17 @@ static void global_atomic_init() {
     setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
     setenv("MESA_DEBUG", "silent", 1);
 	setenv("MESA_NO_ERROR", "1", 1);
-	setenv("mesa_glthread", "true", 1);
+	setenv("MESA_GLTHREAD", "true", 1);
 	setenv("vblank_mode", "0", 1);
 	setenv("TU_ROBUST_BUFFER_ACCESS", "0", 1);
+	
+	setenv("TU_GMEM_ALLOW_OVERLAP", "1", 1);
+	setenv("TU_RENDERPASS_CACHE", "1", 1);
+	setenv("MESA_TEXTURE_MAX_ANISOTROPY", "4", 1);
 
 	#ifdef OVERCLOCK
-	    setenv("KGSL_CONTEXT_PRIORITY", "1", 1);
-	    setenv("ADRENO_TURBO", "1", 1);
 	    setenv("MESA_VK_WSI_PRESENT_MODE", "immediate", 1);
 	#else
-	    setenv("KGSL_CONTEXT_PRIORITY", "2", 1);
-	    setenv("ADRENO_TURBO", "0", 1);
 	    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1);
 	#endif
     
