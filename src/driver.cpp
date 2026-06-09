@@ -317,8 +317,6 @@ static void* hooked_dlopen(const char* filename, int flags) {
     g_in_hook = true;
 	
     void* result = NULL;
-    bool is_relevant = safe_contains(filename, "vulkan") ||
-                       safe_contains(filename, "adreno");
 
     if (safe_contains(filename, "vulkan_adreno") ||
         safe_contains(filename, "adreno") && safe_contains(filename, ".so")) {
