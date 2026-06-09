@@ -276,7 +276,7 @@ static JavaVM* g_java_vm = nullptr;
 
 #ifdef DLOPEN_HOOK
 static void* (*real_dlopen)(const char*, int) = nullptr;
-static thread_local bool g_in_hook = false;
+static __thread bool g_in_hook = false;
 #endif
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
