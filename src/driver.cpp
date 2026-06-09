@@ -276,7 +276,7 @@ static JavaVM* g_java_vm = nullptr;
 
 #ifdef DLOPEN_HOOK
 static void* (*real_dlopen)(const char*, int) = nullptr;
-static __thread bool g_in_hook = false;
+static thread_local bool g_in_hook = false;
 #endif
 
 static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
@@ -320,13 +320,13 @@ static void* hooked_dlopen(const char* filename, int flags) {
     bool is_relevant = safe_contains(filename, "vulkan") ||
                        safe_contains(filename, "adreno");
 
-    if (is_relevant && g_turnip_handle) {
-        if (safe_contains(filename, "vulkan_adreno") ||
-            safe_contains(filename, "libvulkan.so")) {
-            
+    if (safe_contains(filename, "vulkan_adreno") ||
+        safe_contains(filename, "adreno") && safe_contains(filename, ".so")) {
+
+        if (g_turnip_handle) {
             result = g_turnip_handle;
         }
-    }
+	}
 	
     if (result == NULL) {
         result = real_dlopen(filename, flags);
