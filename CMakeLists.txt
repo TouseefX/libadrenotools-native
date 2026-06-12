@@ -7,18 +7,12 @@ endif()
 project(adrenotools LANGUAGES CXX C)
 
 option(OVERCLOCK_BUILD "Enable aggressive performance flags" OFF)
-option(DLOPEN_HOOK "Dlopen hook Makes responses to the driver better but is very unstable" OFF)
 
 if(OVERCLOCK_BUILD)
     add_compile_definitions(OVERCLOCK)
     message(STATUS "Build: Aggressive Overclock Enabled (Heat Warning!)")
 else()
     message(STATUS "Build: Stable Standard Mode")
-endif()
-
-if(DLOPEN_HOOK)
-    add_compile_definitions(DLOPEN_HOOK)
-    message(STATUS "Build: Dlopen Hooked enabled (very unstable can lead to crashes for long hour sessions)")
 endif()
 
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version")
