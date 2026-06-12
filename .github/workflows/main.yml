@@ -7,11 +7,6 @@ on:
         required: true
         type: boolean
         default: false
-      enable_dlopen_hook:
-        description: 'Enables Dlopen hook makes fps and responses better at the cost of crashes'
-        required: true
-        type: boolean
-        default: false
 
 jobs:
   build:
@@ -43,8 +38,7 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -Dlinkernsbypass_BUILD_SHARED=ON \
-            -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG \
-            -DDLOPEN_HOOK=$DLOPEN_HOOK_FLAG
+            -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG
           
           make -j$(nproc)
           cd ..
