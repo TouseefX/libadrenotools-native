@@ -318,9 +318,8 @@ static void* hooked_dlopen(const char* filename, int flags) {
 	
     void* result = NULL;
 
-    if (safe_contains(filename, "vulkan_adreno") ||
-        safe_contains(filename, "adreno") && safe_contains(filename, ".so")) {
-
+    if (safe_contains(filename, "vulkan.adreno.so") {
+		ALOGI("Filename matched vulkan.adreno.so");
         if (g_turnip_handle) {
             result = g_turnip_handle;
         }
