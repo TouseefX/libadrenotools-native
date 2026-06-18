@@ -274,106 +274,141 @@ static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
 static JavaVM* g_java_vm = nullptr;
 
-static PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
+__attribute__((always_inline))
+static inline PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     return g_turnip_gipa(instance, pName);
 }
 
-static PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+__attribute__((always_inline))
+static inline PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     return g_turnip_gdpa(device, pName);
 }
 
+struct CachedJNI {
+    jclass  contextClass   = nullptr;
+    jclass  appInfoClass   = nullptr;
+    jclass  fileClass      = nullptr;
+    jmethodID getAppInfo   = nullptr;
+    jmethodID getCacheDir  = nullptr;
+    jmethodID getAbsPath   = nullptr;
+    jfieldID  nativeLibDir = nullptr;
+    bool ready             = false;
+};
+static CachedJNI g_jni_cache;
+
+static void prime_jni_cache(JNIEnv* env) {
+    if (g_jni_cache.ready) return;
+
+    jclass ctx  = env->FindClass("android/content/Context");
+    jclass ai   = env->FindClass("android/content/pm/ApplicationInfo");
+    jclass file = env->FindClass("java/io/File");
+
+    if (!ctx || !ai || !file) return;
+
+    g_jni_cache.contextClass   = (jclass)env->NewGlobalRef(ctx);
+    g_jni_cache.appInfoClass   = (jclass)env->NewGlobalRef(ai);
+    g_jni_cache.fileClass      = (jclass)env->NewGlobalRef(file);
+
+    g_jni_cache.getAppInfo     = env->GetMethodID(ctx,  "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+    g_jni_cache.getCacheDir    = env->GetMethodID(ctx,  "getCacheDir",        "()Ljava/io/File;");
+    g_jni_cache.nativeLibDir   = env->GetFieldID (ai,   "nativeLibraryDir",   "Ljava/lang/String;");
+    g_jni_cache.getAbsPath     = env->GetMethodID(file, "getAbsolutePath",    "()Ljava/lang/String;");
+
+    env->DeleteLocalRef(ctx);
+    env->DeleteLocalRef(ai);
+    env->DeleteLocalRef(file);
+
+    g_jni_cache.ready = true;
+}
+
 static char* get_native_library_dir(JNIEnv* env, jobject context) {
-    char* native_libdir = nullptr;
+    if (!context) return nullptr;
 
-    if (context != nullptr) {
-        jclass contextClass = env->FindClass("android/content/Context");
-        jmethodID getAppInfo = env->GetMethodID(contextClass, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
-        jobject appInfo = env->CallObjectMethod(context, getAppInfo);
+    prime_jni_cache(env);
+    if (!g_jni_cache.ready) return nullptr;
 
-        jclass appInfoClass = env->GetObjectClass(appInfo);
-        jfieldID fieldId = env->GetFieldID(appInfoClass, "nativeLibraryDir", "Ljava/lang/String;");
-        jstring jPath = (jstring)env->GetObjectField(appInfo, fieldId);
+    jobject appInfo = env->CallObjectMethod(context, g_jni_cache.getAppInfo);
+    if (!appInfo) return nullptr;
 
-        if (jPath) {
-            const char* path_chars = env->GetStringUTFChars(jPath, nullptr);
-            if (path_chars) {
-                native_libdir = strdup(path_chars);
-                env->ReleaseStringUTFChars(jPath, path_chars);
-            }
-			env->DeleteLocalRef(jPath);
-        }
+    jstring jPath = (jstring)env->GetObjectField(appInfo, g_jni_cache.nativeLibDir);
+    env->DeleteLocalRef(appInfo);
+    if (!jPath) return nullptr;
 
-        env->DeleteLocalRef(contextClass);
-        env->DeleteLocalRef(appInfo);
-        env->DeleteLocalRef(appInfoClass);
+    const char* path_chars = env->GetStringUTFChars(jPath, nullptr);
+    char* result = path_chars ? strdup(path_chars) : nullptr;
+    if (path_chars) env->ReleaseStringUTFChars(jPath, path_chars);
+    env->DeleteLocalRef(jPath);
+
+    return result;
+}
+
+static void read_first_line(const char* path, char* out, size_t out_len) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+
+    ssize_t n = read(fd, out, out_len - 1);
+    close(fd);
+
+    if (n > 0) {
+        // strip newline
+        char* nl = (char*)memchr(out, '\n', n);
+        out[nl ? (nl - out) : n] = '\0';
     }
-
-    return native_libdir;
 }
 
 void applyTurnipOptimizations() {
-    std::string gpuName = "";
-	
-    std::ifstream kgslFile("/sys/class/kgsl/kgsl-3d0/gpu_model");
-    if (kgslFile.is_open()) {
-        std::getline(kgslFile, gpuName);
-        kgslFile.close();
-	}
-	
-    if (gpuName.empty()) {
-        std::ifstream dtFile("/proc/device-tree/model");
-        if (dtFile.is_open()) {
-            std::getline(dtFile, gpuName);
-            dtFile.close();
-		}
-    }
-	
-    if (gpuName.empty()) {
-        std::ifstream devTreeFile("/sys/firmware/devicetree/base/model");
-        if (devTreeFile.is_open()) {
-            std::getline(devTreeFile, gpuName);
-            devTreeFile.close();
-        }
-    }
-	
-    if (gpuName.empty()) {
-        #ifdef OVERCLOCK
-            setenv("TU_DEBUG", "noconform,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
-        #else
-            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu,forcecb", 1);
-        #endif
-		return;
-    }
-	
-    char firstDigit = (!gpuName.empty()) ? gpuName[0] : '0';
+    char gpuName[64] = {};
 
-    bool isAdreno8 = (firstDigit == '8');
-    bool isAdreno7 = (firstDigit == '7');
-    
-    if (isAdreno8) {
-		ALOGI("Applying Flags For Adreno 8 (forcing Sssmem to prevent page faults)");
-		setenv("tu_override_uncached_as_cache_coherent", "true", 1);
+    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model",           gpuName, sizeof(gpuName));
+    if (!gpuName[0]) read_first_line("/proc/device-tree/model",     gpuName, sizeof(gpuName));
+    if (!gpuName[0]) read_first_line("/sys/firmware/devicetree/base/model", gpuName, sizeof(gpuName));
+
+    if (!gpuName[0]) {
+        // Unknown GPU — safe conservative fallback
 #ifdef OVERCLOCK
-		setenv("TU_DEBUG", "noconform,sysmem,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
+        setenv("TU_DEBUG", "noconform,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
 #else
-		setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
+        setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu,forcecb", 1);
 #endif
-	} else if (isAdreno7) {
-		ALOGI("Applying Flags For Adreno 7 (Uses Autotuner)");
-		setenv("tu_override_uncached_as_cache_coherent", "true", 1);
+        return;
+    }
+	
+    int gen = 0;
+    for (const char* p = gpuName; *p; ++p) {
+        if (*p >= '5' && *p <= '8') { gen = *p - '0'; break; }
+    }
+
+    switch (gen) {
+        case 8:
+            ALOGI("Adreno 8xx: sysmem + cache-coherent");
+            setenv("tu_override_uncached_as_cache_coherent", "true", 1);
 #ifdef OVERCLOCK
-		setenv("TU_DEBUG", "noconform,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
+            setenv("TU_DEBUG", "noconform,sysmem,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
 #else
-		setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
+            setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
 #endif
-	} else {
-		ALOGI("Applying Flags For Adreno 6 (Using Sysmem for Stability)");
+            break;
+
+        case 7:
+            ALOGI("Adreno 7xx: autotuner path");
+            setenv("tu_override_uncached_as_cache_coherent", "true", 1);
 #ifdef OVERCLOCK
-		setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,unaligned_store,deck_emu", 1);
+            setenv("TU_DEBUG", "noconform,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
 #else
-		setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
+            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
 #endif
-	}
+            break;
+
+        default:
+            // Adreno 5xx / 6xx — sysmem is more stable on older silicon
+            ALOGI("Adreno 5xx/6xx: sysmem stability path");
+#ifdef OVERCLOCK
+            setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,unaligned_store,deck_emu", 1);
+#else
+            setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
+#endif
+            break;
+    }
 }
 
 static void* g_shadow_stub_gipa = nullptr;
@@ -381,51 +416,43 @@ static void* g_shadow_stub_gdpa = nullptr;
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     if (g_turnip_handle != nullptr) {
-        ALOGI("init_turnip_driver: already initialized, refreshing hooks");
+        ALOGI("init_turnip_driver: re-hooking existing handle");
 
-        if (g_shadow_stub_gipa) {
-            shadowhook_unhook(g_shadow_stub_gipa);
-            g_shadow_stub_gipa = nullptr;
-        }
-		
-        if (g_shadow_stub_gdpa) {
-            shadowhook_unhook(g_shadow_stub_gdpa);
-            g_shadow_stub_gdpa = nullptr;
-        }
-		
+        if (g_shadow_stub_gipa) { shadowhook_unhook(g_shadow_stub_gipa); g_shadow_stub_gipa = nullptr; }
+        if (g_shadow_stub_gdpa) { shadowhook_unhook(g_shadow_stub_gdpa); g_shadow_stub_gdpa = nullptr; }
+
         g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
+        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
+        return;
+    }
+	
+    char fixed_dir[512]  = {};
+    char tmpdir[512]     = {};
+    char cache_dir[512]  = {};
 
-
+    char* native_lib_dir = get_native_library_dir(env, context);
+    if (!native_lib_dir) {
+        ALOGE("init_turnip_driver: could not resolve native lib dir");
         return;
     }
 
-    char* native_lib_dir = get_native_library_dir(env, context);
-
-    char fixed_dir[512];
-	int ret = 0;
     snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
-    __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", "Native Lib Dir: %s", fixed_dir);
-    
+    ALOGI("Native Lib Dir: %s", fixed_dir);
     setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
-    
-    jclass contextClass = env->GetObjectClass(context);
-    jmethodID getCacheDir = env->GetMethodID(contextClass, "getCacheDir", "()Ljava/io/File;");
-    jobject cacheFileObj = env->CallObjectMethod(context, getCacheDir);
-    jclass fileClass = env->GetObjectClass(cacheFileObj);
-    jmethodID getAbsolutePath = env->GetMethodID(fileClass, "getAbsolutePath", "()Ljava/lang/String;");
-    jstring jPath = (jstring)env->CallObjectMethod(cacheFileObj, getAbsolutePath);
+	
+    prime_jni_cache(env);
+    jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
+    jstring jPath        = (jstring)env->CallObjectMethod(cacheFileObj, g_jni_cache.getAbsPath);
 
     const char* base_cache_path = env->GetStringUTFChars(jPath, nullptr);
 
-    char tmpdir[512];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/turnip_tmp/", base_cache_path);
-    mkdir(tmpdir, 0775);
-
-    char cache_dir[512];
+    snprintf(tmpdir,    sizeof(tmpdir),    "%s/turnip_tmp/",          base_cache_path);
     snprintf(cache_dir, sizeof(cache_dir), "%s/turnip_shader_cache/", base_cache_path);
-    mkdir(cache_dir, 0775);
-    
+	
+    struct stat st;
+    if (stat(tmpdir,    &st) != 0) mkdir(tmpdir,    0775);
+    if (stat(cache_dir, &st) != 0) mkdir(cache_dir, 0775);
+
     setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
 
     g_turnip_handle = adrenotools_open_libvulkan(
@@ -439,174 +466,173 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         NULL
     );
 
-    if (!g_turnip_handle) {
-        ALOGE("Failed to load Turnip via adrenotools");
-        goto cleanup;
-    }
+    if (!g_turnip_handle) { ALOGE("adrenotools_open_libvulkan failed"); goto cleanup; }
 
     g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
     if (!g_turnip_gipa) {
-        ALOGE("Failed to get vkGetInstanceProcAddr from Turnip");
-		dlclose(g_turnip_handle);
-        g_turnip_handle = nullptr;
+        ALOGE("dlsym vkGetInstanceProcAddr failed");
+        dlclose(g_turnip_handle); g_turnip_handle = nullptr;
         goto cleanup;
     }
 
     g_turnip_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_turnip_handle, "vkGetDeviceProcAddr");
     if (!g_turnip_gdpa) {
-        ALOGE("Failed to get vkGetDeviceProcAddr from Turnip");
-		dlclose(g_turnip_handle);
-        g_turnip_handle = nullptr;
+        ALOGE("dlsym vkGetDeviceProcAddr failed");
+        dlclose(g_turnip_handle); g_turnip_handle = nullptr;
         goto cleanup;
     }
 
-    ALOGI("Turnip loaded, setting up hooks...");
-    
+    ALOGI("Turnip loaded — installing hooks");
     g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr", (void*)hooked_vkGetDeviceProcAddr, NULL);
-	
-	#ifdef OVERCLOCK
-	    ALOGI("Enabling Overclock make sure you have a fan cooler");
-	    adrenotools_set_turbo(true);
-	    ret = setpriority(PRIO_PROCESS, 0, -20);
-        if (ret != 0) {
-            ALOGI("setpriority to -20 failed (no root), trying -10");
-            setpriority(PRIO_PROCESS, 0, -10); // usually allowed without root
-	    }
-	#else
-	    ALOGI("using stranded mode");
-	    adrenotools_set_turbo(false);
-	#endif
+    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
 
-    ALOGI("Turnip hooks installed successfully");
+#ifdef OVERCLOCK
+    ALOGI("Overclock mode — turbo + priority boost");
+    adrenotools_set_turbo(true);
+    if (setpriority(PRIO_PROCESS, 0, -20) != 0) {
+        ALOGI("setpriority -20 denied, trying -10");
+        setpriority(PRIO_PROCESS, 0, -10);
+    }
+#else
+    ALOGI("Standard mode");
+    adrenotools_set_turbo(false);
+#endif
+
+    ALOGI("Turnip hooks installed");
 
 cleanup:
     env->ReleaseStringUTFChars(jPath, base_cache_path);
-    env->DeleteLocalRef(contextClass);
     env->DeleteLocalRef(cacheFileObj);
-    env->DeleteLocalRef(fileClass);
+    env->DeleteLocalRef(jPath);
     free(native_lib_dir);
 }
 
 __attribute__((constructor))
 static void global_atomic_init() {
-    setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
-    setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1", 1);
-	setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS", "1", 1);
+    // ─── Core Mesa/Vulkan env ───
+    setenv("MESA_VULKAN_ICD_SELECT",              "turnip",   1);
+    setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "1",        1);
+    setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS",   "1",        1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-	setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
-    setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 1);
-	unsetenv("MESA_DISK_CACHE_SINGLE_FILE");
-	unsetenv("MESA_DISK_CACHE_READ_ONLY");
-	
-    setenv("GALLIUM_PRINT_OPTIONS", "0", 1);
-    setenv("MESA_DEBUG", "silent", 1);
-	setenv("MESA_NO_ERROR", "1", 1);
-	setenv("MESA_GLTHREAD", "true", 1);
-	setenv("vblank_mode", "0", 1);
-	setenv("TU_ROBUST_BUFFER_ACCESS", "0", 1);
-	
-	setenv("TU_GMEM_ALLOW_OVERLAP", "1", 1);
-	setenv("TU_RENDERPASS_CACHE", "1", 1);
-	setenv("MESA_TEXTURE_MAX_ANISOTROPY", "4", 1);
+    setenv("MESA_SHADER_CACHE_DISABLE",           "false",    1);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE",          "4G",       1);
+    unsetenv("MESA_DISK_CACHE_SINGLE_FILE");
+    unsetenv("MESA_DISK_CACHE_READ_ONLY");
 
-	#ifdef OVERCLOCK
-	    setenv("MESA_VK_WSI_PRESENT_MODE", "immediate", 1);
-	#else
-	    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox", 1);
-	#endif
-    
-    setenv("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK", "1", 1);
-    setenv("UNITY_VULKAN_ENABLE_VALIDATION_LAYERS", "0", 1);
-	setenv("UNITY_GFX_DEVICE_API", "vulkan", 1);
+    // ─── Perf / debug ───
+    setenv("GALLIUM_PRINT_OPTIONS", "0",      1);
+    setenv("MESA_DEBUG",            "silent", 1);
+    setenv("MESA_NO_ERROR",         "1",      1);
+    setenv("MESA_GLTHREAD",         "true",   1);
+    setenv("vblank_mode",           "0",      1);
+    setenv("TU_ROBUST_BUFFER_ACCESS", "0",   1);
+    setenv("TU_GMEM_ALLOW_OVERLAP",   "1",   1);
+    setenv("TU_RENDERPASS_CACHE",     "1",   1);
 
-	long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGESIZE);
-    long long total_ram_bytes = (long long)pages * page_size;
-    
-    long heap_size_mb = (total_ram_bytes / (1024 * 1024)) / 2;
-    
-    if (heap_size_mb < 256) {
-        heap_size_mb = 256;
+    // ─── Anisotropy: 4x is a good balance for weak CPUs — 16x wastes fillrate ───
+    setenv("MESA_TEXTURE_MAX_ANISOTROPY", "4", 1);
+
+    // ─── WSI present mode ───
+#ifdef OVERCLOCK
+    setenv("MESA_VK_WSI_PRESENT_MODE", "immediate", 1);
+#else
+    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox",   1);
+#endif
+
+    // ─── Unity ───
+    setenv("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK",  "1",      1);
+    setenv("UNITY_VULKAN_ENABLE_VALIDATION_LAYERS", "0",     1);
+    setenv("UNITY_GFX_DEVICE_API",                 "vulkan", 1);
+
+    // ─── Heap size: cap at 40% of RAM on weak devices to avoid OOM kills ───
+    // 50% was causing ~5–6 GB on 12 GB devices; weak phones are 2–4 GB.
+    {
+        long pages     = sysconf(_SC_PHYS_PAGES);
+        long page_size = sysconf(_SC_PAGESIZE);
+        long long total_mb = ((long long)pages * page_size) / (1024 * 1024);
+
+        // On phones with 2 GB RAM, 50% = 1024 MB which starves the OS.
+        // 40% is safer; floor stays at 256 MB for very constrained devices.
+        long heap_mb = (long)(total_mb * 40 / 100);
+        if (heap_mb < 256) heap_mb = 256;
+
+        char heap_str[16];
+        snprintf(heap_str, sizeof(heap_str), "%ld", heap_mb);
+        setenv("TU_OVERRIDE_HEAP_SIZE", heap_str, 1);
+        ALOGI("TU_OVERRIDE_HEAP_SIZE=%s MB (40%% of %lld MB RAM)", heap_str, total_mb);
     }
 
-    char heap_str[16];
-    snprintf(heap_str, sizeof(heap_str), "%ld", heap_size_mb);
-    
-    setenv("TU_OVERRIDE_HEAP_SIZE", heap_str, 1);
-    ALOGI("Set TU_OVERRIDE_HEAP_SIZE to %s MB based on system RAM", heap_str);
+    // ─── SDK / One UI detection ───
+    {
+        char sdk_str[8] = {};
+        __system_property_get("ro.build.version.sdk", sdk_str);
+        int sdk = atoi(sdk_str);
+        ALOGI("Android SDK: %d", sdk);
 
-	char sdk_str[8] = {};
-    __system_property_get("ro.build.version.sdk", sdk_str);
-    int sdk = atoi(sdk_str);
+        unsetenv("MESA_VK_VERSION_OVERRIDE");
+        unsetenv("FD_DEV_FEATURES");
 
-    ALOGI("Android SDK: %d", sdk);
-
-    unsetenv("MESA_VK_VERSION_OVERRIDE");
-	unsetenv("FD_DEV_FEATURES");
-
-	char oneui_str[PROP_VALUE_MAX] = {0};
-    bool is_affected_oneui = false;
-    
-    if (__system_property_get("ro.build.version.oneui", oneui_str) > 0) {
-        int raw_version = atoi(oneui_str);
-		
-        if (raw_version >= 60000) {
-            is_affected_oneui = true;
-            int major = raw_version / 10000;
-            int minor = (raw_version % 10000) / 100;
-            ALOGI("Targeted One UI version detected: %d.%d", major, minor);
+        char oneui_str[PROP_VALUE_MAX] = {};
+        if (__system_property_get("ro.build.version.oneui", oneui_str) > 0) {
+            int raw = atoi(oneui_str);
+            if (raw >= 60000 && sdk >= 30) {
+                int major = raw / 10000, minor = (raw % 10000) / 100;
+                ALOGI("One UI %d.%d detected — enabling UBWC flag hint", major, minor);
+                setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
+            }
         }
-	}
-
-	if (is_affected_oneui && sdk >= 30) {
-        setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
-        ALOGI("One UI 6.0+: UBWC flag hint enabled to prevent texture glitches");
     }
 
-	applyTurnipOptimizations();
-	
+    applyTurnipOptimizations();
+
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-	bytehook_init(BYTEHOOK_MODE_MANUAL, false);
+    bytehook_init(BYTEHOOK_MODE_MANUAL,     false);
 }
 
 void perform_init(JavaVM* vm) {
-	ALOGI("JNI_OnLoad: started");
-	
+    ALOGI("JNI_OnLoad: started");
+
     JNIEnv* env = nullptr;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
     }
 
-    static jclass activityThreadCls = (jclass)env->NewGlobalRef(env->FindClass("android/app/ActivityThread"));
-    static jmethodID currentAppMid = env->GetStaticMethodID(activityThreadCls, "currentApplication", "()Landroid/app/Application;");
+    // ─── Cache ActivityThread lookups as globals — only done once ───
+    static jclass activityThreadCls = (jclass)env->NewGlobalRef(
+        env->FindClass("android/app/ActivityThread"));
+    static jmethodID currentAppMid  = env->GetStaticMethodID(
+        activityThreadCls, "currentApplication", "()Landroid/app/Application;");
 
     jobject app = env->CallStaticObjectMethod(activityThreadCls, currentAppMid);
-
     if (app) {
-        ALOGI("JNI_OnLoad: Initializing Turnip immediately");
+        ALOGI("JNI_OnLoad: app ready, initializing immediately");
         init_turnip_driver(env, app);
-    } else {
-        std::thread([vm]() {
-            JNIEnv* t_env = nullptr;
-            vm->AttachCurrentThread(&t_env, nullptr);
-
-            jclass atCls = t_env->FindClass("android/app/ActivityThread");
-            jmethodID caMid = t_env->GetStaticMethodID(atCls, "currentApplication", "()Landroid/app/Application;");
-
-            jobject t_app = nullptr;
-            for (int i = 0; i < 10 && !t_app; ++i) {
-               t_app = t_env->CallStaticObjectMethod(atCls, caMid);
-               if (!t_app) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-
-            if (t_app) init_turnip_driver(t_env, t_app);
-               t_env->DeleteLocalRef(atCls);
-               if (t_app) t_env->DeleteLocalRef(t_app);
-
-           vm->DetachCurrentThread();
-        }).detach();
+        env->DeleteLocalRef(app);
+        return;
     }
+
+    // ─── Fallback poll thread — kept lightweight ───
+    // Captures only the VM pointer; no lambdas with heavy captures.
+    std::thread([vm]() {
+        JNIEnv* t_env = nullptr;
+        vm->AttachCurrentThread(&t_env, nullptr);
+
+        jclass     atCls = t_env->FindClass("android/app/ActivityThread");
+        jmethodID  caMid = t_env->GetStaticMethodID(atCls, "currentApplication",
+                                                      "()Landroid/app/Application;");
+        jobject t_app    = nullptr;
+		
+        for (int i = 0; i < 20 && !t_app; ++i) {
+            t_app = t_env->CallStaticObjectMethod(atCls, caMid);
+            if (!t_app) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+
+        if (t_app) init_turnip_driver(t_env, t_app);
+
+        t_env->DeleteLocalRef(atCls);
+        if (t_app) t_env->DeleteLocalRef(t_app);
+        vm->DetachCurrentThread();
+    }).detach();
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
