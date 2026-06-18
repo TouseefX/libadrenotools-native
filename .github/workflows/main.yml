@@ -24,9 +24,9 @@ jobs:
           add-to-path: true
 
       - name: Set up CMake 4.0.8
-       uses: jwlawson/actions-setup-cmake@v2
-       with:
-         cmake-version: '4.0.8'
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '4.0.8'
 
       - name: Build with CMake
         run: |
