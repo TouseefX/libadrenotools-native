@@ -23,11 +23,13 @@ jobs:
           ndk-version: r29
           add-to-path: true
 
-      - name: Set up CMake 4.0.8
-        uses: Kitware/actions-setup-cmake@v1
-        with:
-          cmake-version: '4.0.8'
-
+      - name: Set up CMake 4.3.4
+        run: |
+          wget -q https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.sh
+          chmod +x cmake-4.3.4-linux-x86_64.sh
+          sudo ./cmake-4.3.4-linux-x86_64.sh --skip-license --prefix=/usr/local
+          cmake --version
+      
       - name: Build with CMake
         run: |
           git submodule update --init --recursive
