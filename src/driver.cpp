@@ -25,13 +25,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <jni.h>
-#include <shadowhook.h>
 #include <atomic>
 #include <stdatomic.h>
 #include <pthread.h>
 #include <vector>
 #include <mutex>
-#include <bytehook.h>
 #include <sys/resource.h>
 #include <sys/system_properties.h>
 #include <iostream>
@@ -47,7 +45,75 @@
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
 #define MAX_FILENAME_SCAN 512
 
-void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
+bool adrenotools_install_hook(const char *hookLibDir, int featureFlags,
+                              const char *customDriverDir, const char *customDriverName,
+                              const char *fileRedirectDir)
+{
+    if (!linkernsbypass_load_status()) {
+        ALOGE("FAILURE: linkernsbypass not loaded");
+        return false;
+    }
+    if (!hookLibDir) {
+        ALOGE("hookLibDir is required");
+        return false;
+    }
+
+    adrenotools_gpu_mapping *importMapping = nullptr;
+    if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
+        importMapping = new adrenotools_gpu_mapping{};
+    }
+
+    HookImplParams *params = new HookImplParams(
+        featureFlags, nullptr, hookLibDir,
+        customDriverDir ? customDriverDir : "",
+        customDriverName ? customDriverName : "",
+        fileRedirectDir ? fileRedirectDir : "",
+        importMapping
+    );
+
+    std::string hookImplPath = std::string(hookLibDir) + "/libhook_impl.so";
+    void *hookImpl = dlopen(hookImplPath.c_str(), RTLD_NOW);
+    if (!hookImpl) hookImpl = dlopen("libhook_impl.so", RTLD_NOW);
+    if (!hookImpl) {
+        ALOGE("Could not load libhook_impl.so");
+        delete params;
+        return false;
+    }
+
+    auto initHookParam = reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"));
+    if (!initHookParam) {
+        ALOGE("init_hook_param not found");
+        dlclose(hookImpl);
+        delete params;
+        return false;
+    }
+    initHookParam(params);
+
+    std::string mainPath = std::string(hookLibDir) + "/libmain_hook.so";
+    void *mainHook = dlopen(mainPath.c_str(), RTLD_GLOBAL | RTLD_NOW);
+    if (!mainHook) mainHook = dlopen("libmain_hook.so", RTLD_GLOBAL | RTLD_NOW);
+    if (mainHook) {
+        ALOGI("libmain_hook.so loaded with RTLD_GLOBAL into app namespace");
+    }
+
+    if (featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
+        std::string fr = std::string(hookLibDir) + "/libfile_redirect_hook.so";
+        dlopen(fr.c_str(), RTLD_GLOBAL | RTLD_NOW) || dlopen("libfile_redirect_hook.so", RTLD_GLOBAL | RTLD_NOW);
+    }
+    if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
+        std::string gsl = std::string(hookLibDir) + "/libgsl_alloc_hook.so";
+        dlopen(gsl.c_str(), RTLD_GLOBAL | RTLD_NOW) || dlopen("libgsl_alloc_hook.so", RTLD_GLOBAL | RTLD_NOW);
+    }
+
+    ALOGI("adrenotools_install_hook SUCCESS");
+    return true;
+}
+
+void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir,
+                                 const char *hookLibDir, const char *customDriverDir,
+                                 const char *customDriverName, const char *fileRedirectDir,
+                                 void **userMappingHandle)
+{
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
         return nullptr;
@@ -57,7 +123,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
         tmpLibDir = nullptr;
 
     if (!(featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && fileRedirectDir) {
-         ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT present but no file redirect folder found\n");
+        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT present but no file redirect folder found\n");
         return nullptr;
     }
 
@@ -78,7 +144,6 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder parameter was specified\n");
             return nullptr;
         }
-
         if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0) {
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist\n");
             return nullptr;
@@ -90,7 +155,6 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but no folder parameter was found\n");
             return nullptr;
         }
-
         if (stat(fileRedirectDir, &buf) != 0) {
             ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but specified redirect folder doesn't exist\n");
             return nullptr;
@@ -98,7 +162,6 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
     }
 
     auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
-
     if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs)) {
         return nullptr;
     }
@@ -121,7 +184,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
             *userMappingHandle = mapping;
             return mapping;
         } else {
-        	ALOGW("WARN: Memory mapping flag was not specified\n");
+            ALOGW("WARN: Memory mapping flag was not specified\n");
             return nullptr;
         }
     }()};
@@ -272,7 +335,7 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
-static JavaVM* g_java_vm = nullptr;
+static JavaVM* g_java_vm = nullptr; 
 
 __attribute__((always_inline))
 static inline PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
@@ -411,18 +474,9 @@ void applyTurnipOptimizations() {
     }
 }
 
-static void* g_shadow_stub_gipa = nullptr;
-static void* g_shadow_stub_gdpa = nullptr;
-
 static void init_turnip_driver(JNIEnv* env, jobject context) {
     if (g_turnip_handle != nullptr) {
-        ALOGI("init_turnip_driver: re-hooking existing handle");
-
-        if (g_shadow_stub_gipa) { shadowhook_unhook(g_shadow_stub_gipa); g_shadow_stub_gipa = nullptr; }
-        if (g_shadow_stub_gdpa) { shadowhook_unhook(g_shadow_stub_gdpa); g_shadow_stub_gdpa = nullptr; }
-
-        g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
+        ALOGI("init_turnip_driver: Turnip already initialized");
         return;
     }
 	
@@ -454,7 +508,10 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     if (stat(cache_dir, &st) != 0) mkdir(cache_dir, 0775);
 
     setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
-
+    
+    adrenotools_install_hook(native_lib_dir, ADRENOTOOLS_DRIVER_CUSTOM,
+                             native_lib_dir, "libvulkan_freedreno.so", nullptr);
+    
     g_turnip_handle = adrenotools_open_libvulkan(
         RTLD_GLOBAL | RTLD_NOW,
         ADRENOTOOLS_DRIVER_CUSTOM,
@@ -466,7 +523,10 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         NULL
     );
 
-    if (!g_turnip_handle) { ALOGE("adrenotools_open_libvulkan failed"); goto cleanup; }
+    if (!g_turnip_handle) { 
+        ALOGE("adrenotools_open_libvulkan failed - falling back or check custom driver presence in native lib dir"); 
+        goto cleanup; 
+    }
 
     g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
     if (!g_turnip_gipa) {
@@ -482,9 +542,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
         goto cleanup;
     }
 
-    ALOGI("Turnip loaded — installing hooks");
-    g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
+    ALOGI("Turnip loaded successfully via hook_impl (no shadowhook/bytehook). Use g_turnip_g*pa for Vulkan setup to get custom driver name/properties.");
 
 #ifdef OVERCLOCK
     ALOGI("Overclock mode — turbo + priority boost");
@@ -498,7 +556,7 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     adrenotools_set_turbo(false);
 #endif
 
-    ALOGI("Turnip hooks installed");
+    ALOGI("Turnip ready (hook_impl only)");
 
 cleanup:
     env->ReleaseStringUTFChars(jPath, base_cache_path);
@@ -545,14 +603,11 @@ static void global_atomic_init() {
     setenv("UNITY_GFX_DEVICE_API",                 "vulkan", 1);
 
     // ─── Heap size: cap at 40% of RAM on weak devices to avoid OOM kills ───
-    // 50% was causing ~5–6 GB on 12 GB devices; weak phones are 2–4 GB.
     {
         long pages     = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf(_SC_PAGESIZE);
         long long total_mb = ((long long)pages * page_size) / (1024 * 1024);
 
-        // On phones with 2 GB RAM, 50% = 1024 MB which starves the OS.
-        // 40% is safer; floor stays at 256 MB for very constrained devices.
         long heap_mb = (long)(total_mb * 40 / 100);
         if (heap_mb < 256) heap_mb = 256;
 
@@ -584,9 +639,6 @@ static void global_atomic_init() {
     }
 
     applyTurnipOptimizations();
-
-    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-    bytehook_init(BYTEHOOK_MODE_MANUAL,     false);
 }
 
 void perform_init(JavaVM* vm) {
@@ -612,7 +664,6 @@ void perform_init(JavaVM* vm) {
     }
 
     // ─── Fallback poll thread — kept lightweight ───
-    // Captures only the VM pointer; no lambdas with heavy captures.
     std::thread([vm]() {
         JNIEnv* t_env = nullptr;
         vm->AttachCurrentThread(&t_env, nullptr);
