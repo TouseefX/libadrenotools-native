@@ -332,20 +332,7 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
     }
 }
 
-static void *g_turnip_handle = NULL;
-static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
-static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
-static JavaVM* g_java_vm = nullptr; 
-
-__attribute__((always_inline))
-static inline PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-    return g_turnip_gipa(instance, pName);
-}
-
-__attribute__((always_inline))
-static inline PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-    return g_turnip_gdpa(device, pName);
-}
+static JavaVM* g_java_vm = nullptr;
 
 struct CachedJNI {
     jclass  contextClass   = nullptr;
@@ -511,36 +498,6 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
     
     adrenotools_install_hook(native_lib_dir, ADRENOTOOLS_DRIVER_CUSTOM,
                              native_lib_dir, "libvulkan_freedreno.so", nullptr);
-    
-    g_turnip_handle = adrenotools_open_libvulkan(
-        RTLD_GLOBAL | RTLD_NOW,
-        ADRENOTOOLS_DRIVER_CUSTOM,
-        tmpdir,
-        native_lib_dir,
-        fixed_dir,
-        "libvulkan_freedreno.so",
-        NULL,
-        NULL
-    );
-
-    if (!g_turnip_handle) { 
-        ALOGE("adrenotools_open_libvulkan failed - falling back or check custom driver presence in native lib dir"); 
-        goto cleanup; 
-    }
-
-    g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
-    if (!g_turnip_gipa) {
-        ALOGE("dlsym vkGetInstanceProcAddr failed");
-        dlclose(g_turnip_handle); g_turnip_handle = nullptr;
-        goto cleanup;
-    }
-
-    g_turnip_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_turnip_handle, "vkGetDeviceProcAddr");
-    if (!g_turnip_gdpa) {
-        ALOGE("dlsym vkGetDeviceProcAddr failed");
-        dlclose(g_turnip_handle); g_turnip_handle = nullptr;
-        goto cleanup;
-    }
 
     ALOGI("Turnip loaded successfully via hook_impl (no shadowhook/bytehook). Use g_turnip_g*pa for Vulkan setup to get custom driver name/properties.");
 
