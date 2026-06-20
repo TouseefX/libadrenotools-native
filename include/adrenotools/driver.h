@@ -10,6 +10,11 @@ extern "C" {
 #include <stdbool.h>
 #include "priv.h"
 
+// same as adrenotools_open_libvulkan but doesn't create a isolated namespace and hooks at app namespace
+bool adrenotools_install_hook(const char *hookLibDir, int featureFlags,
+                              const char *customDriverDir, const char *customDriverName,
+                              const char *fileRedirectDir);
+
 /**
  * @brief Opens a new libvulkan.so instance according to `flags`
  * @remark IMPORTANT: The app MUST be packaged w/ useLegacyPackaging = true. The reason for this is
