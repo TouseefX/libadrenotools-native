@@ -333,6 +333,7 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 }
 
 static JavaVM* g_java_vm = nullptr;
+static std::once_flag init_flag;
 
 struct CachedJNI {
     jclass  contextClass   = nullptr;
@@ -462,11 +463,6 @@ void applyTurnipOptimizations() {
 }
 
 static void init_turnip_driver(JNIEnv* env, jobject context) {
-    if (g_turnip_handle != nullptr) {
-        ALOGI("init_turnip_driver: Turnip already initialized");
-        return;
-    }
-	
     char fixed_dir[512]  = {};
     char tmpdir[512]     = {};
     char cache_dir[512]  = {};
@@ -645,6 +641,10 @@ void perform_init(JavaVM* vm) {
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     g_java_vm = vm;
-    perform_init(vm);
+	
+    std::call_once(init_flag, [vm]() {
+        perform_init(vm);
+    });
+	
     return JNI_VERSION_1_6;
 }
