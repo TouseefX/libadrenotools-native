@@ -2,7 +2,3 @@
 	path = lib/linkernsbypass
 	url = https://github.com/utkarshdalal/liblinkernsbypass.git
 	branch = master
-
-[submodule "lib/ShadowHook"]
-	path = lib/ShadowHook
-	url = https://github.com/bytedance/android-inline-hook.git
