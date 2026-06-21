@@ -53,21 +53,29 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
         return fallback();
     }
 
-    // customDriverDir will be empty if ADRENOTOOLS_DRIVER_CUSTOM isn't set therefore it's fine to have either way
-    auto driverNs{android_create_namespace(filename, hook_params->customDriverDir.c_str(),
-                                           hook_params->hookLibDir.c_str(), ANDROID_NAMESPACE_TYPE_SHARED,
-                                           nullptr, extinfo->library_namespace)};
-    if (!driverNs) {
-        LOGI("hook_android_dlopen_ext: hook failed: namespace not supplied!");
-        return fallback();
-    }
+    // Use the namespace the caller already gave us instead of creating a new isolated
+    // child namespace. Everything we load below lands directly in this namespace, so
+    // it's visible from wherever the caller (and the app) already is - no more separate
+    // driverNs that the rest of the process can't see into.
+    auto targetNs{extinfo->library_namespace};
 
-    // We depend on libandroid which is unlikely to be in the supplied driver namespace so we have to link it over
-    android_link_namespaces(driverNs, nullptr, "libandroid.so");
+    // We no longer have a dedicated namespace with hookLibDir set as its default search
+    // path (that's what android_create_namespace used to give us), so bare-name lookups
+    // for our own hook libs won't resolve in targetNs anymore. Build an absolute path
+    // first and fall back to a bare-name lookup in case it's already resolvable.
+    auto loadInTargetNs{[&](const std::string &soname, int loadFlags) -> void * {
+        auto absPath{hook_params->hookLibDir + "/" + soname};
+        if (auto h{linkernsbypass_namespace_dlopen(absPath.c_str(), loadFlags, targetNs)})
+            return h;
+        return linkernsbypass_namespace_dlopen(soname.c_str(), loadFlags, targetNs);
+    }};
 
-    // Preload ourself, a new instance will be created since we have different linker ancestory
-    // If we don't preload we get a weird issue where despite being in NEEDED of the hook lib the hook's symbols will overwrite ours and cause an infinite loop
-    auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, driverNs)};
+    // Preload ourself - if targetNs doesn't already have us loaded (e.g. it's a vendor/
+    // sphal namespace distinct from wherever the install-time copy landed) a fresh
+    // instance gets created here. If we don't preload we get a weird issue where despite
+    // being in NEEDED of the hook lib the hook's symbols will overwrite ours and cause an
+    // infinite loop.
+    auto hookImpl{loadInTargetNs("libhook_impl.so", RTLD_NOW)};
     if (!hookImpl)
         return nullptr;
 
@@ -79,7 +87,7 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
     initHookParam(hook_params);
 
     if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
-        if (!linkernsbypass_namespace_dlopen("libfile_redirect_hook.so", RTLD_GLOBAL, driverNs)) {
+        if (!loadInTargetNs("libfile_redirect_hook.so", RTLD_GLOBAL)) {
             LOGI("hook_android_dlopen_ext: hook failed: failed to apply libfopen_redirect_hook!");
             return fallback();
         }
@@ -87,16 +95,18 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
         LOGI("hook_android_dlopen_ext: applied libfile_redirect_hook");
     }
 
-    // Use our new namespace to load the vulkan driver
+    // Use the existing namespace to load the vulkan driver
     auto newExtinfo{*extinfo};
-    newExtinfo.library_namespace = driverNs;
+    newExtinfo.library_namespace = targetNs;
 
     if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
-        if (!linkernsbypass_namespace_dlopen("libgsl_alloc_hook.so", RTLD_GLOBAL, driverNs)) {
+        if (!loadInTargetNs("libgsl_alloc_hook.so", RTLD_GLOBAL)) {
             LOGI("hook_android_dlopen_ext: hook failed: failed to apply libgsl_alloc_hook!");
             return fallback();
         }
 
+        // These are vendor-side libs that already live on targetNs's normal search
+        // path, so bare names are fine here.
         auto libgslHandle{android_dlopen_ext("vkbgsl.so", RTLD_NOW, &newExtinfo)};
         if (!libgslHandle) {
             libgslHandle = android_dlopen_ext("notgsl.so", RTLD_NOW, &newExtinfo);
@@ -126,8 +136,16 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
     // TODO: If there is already an instance of a Vulkan driver loaded hooks won't be applied, this will only be the case for skiavk generally
     // To fix this we would need to search /proc/self/maps for the file to a loaded instance of the library in order to read it to patch the soname and load it uniquely
     if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
-        LOGI("hook_android_dlopen_ext: loading custom driver: %s%s", hook_params->customDriverDir.c_str(), hook_params->customDriverName.c_str());
-        void *handle{android_dlopen_ext(hook_params->customDriverName.c_str(), flags, &newExtinfo)};
+        // customDriverDir is expected to already end in '/', matching the LOGI line below
+        auto customDriverPath{hook_params->customDriverDir + hook_params->customDriverName};
+        LOGI("hook_android_dlopen_ext: loading custom driver: %s", customDriverPath.c_str());
+
+        void *handle{android_dlopen_ext(customDriverPath.c_str(), flags, &newExtinfo)};
+        if (!handle) {
+            // fall back to a bare-name lookup in case customDriverDir is already on
+            // targetNs's search path
+            handle = android_dlopen_ext(hook_params->customDriverName.c_str(), flags, &newExtinfo);
+        }
         if (!handle) {
             LOGI("hook_android_dlopen_ext: hook failed: failed to load custom driver: %s!", dlerror());
             return fallback();
