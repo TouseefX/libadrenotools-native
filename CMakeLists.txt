@@ -23,8 +23,9 @@ if(OVERCLOCK_BUILD)
     add_compile_definitions(OVERCLOCK)
 	
     list(APPEND PERF_FLAGS 
-        "-funroll-loops" 
-        "-faggressive-loop-optimizations"
+        "-funroll-loops"
+        "-mllvm" "-unroll-threshold=500"
+        "-mllvm" "-vectorize-loops"
     )
 	
     message(STATUS "Build: Aggressive Overclock Enabled (Heat Warning!)")
