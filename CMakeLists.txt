@@ -21,7 +21,12 @@ set(ARM_TARGET_FLAGS "-march=armv8.2-a+crypto+dotprod+fp16")
 
 if(OVERCLOCK_BUILD)
     add_compile_definitions(OVERCLOCK)
-    list(APPEND PERF_FLAGS "-finline-functions" "-fgcse-las" "-fmodulo-sched")
+	
+    list(APPEND PERF_FLAGS 
+        "-funroll-loops" 
+        "-faggressive-loop-optimizations"
+    )
+	
     message(STATUS "Build: Aggressive Overclock Enabled (Heat Warning!)")
 else()
     message(STATUS "Build: Stable Standard Mode")
