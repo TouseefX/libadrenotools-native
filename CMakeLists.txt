@@ -17,7 +17,7 @@ check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
 
 set(PERF_FLAGS "-O3" "-ffast-math" "-fomit-frame-pointer" "-funroll-loops" "-fvectorize" "-fslp-vectorize")
 
-set(ARM_TARGET_FLAGS "-march=armv8-a+crypto+crc" "-mcpu=cortex-a73")
+set(ARM_TARGET_FLAGS "-march=armv8.2-a+crypto+dotprod+fp16")
 
 if(OVERCLOCK_BUILD)
     add_compile_definitions(OVERCLOCK)
