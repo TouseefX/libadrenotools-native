@@ -6,16 +6,25 @@ endif()
 
 project(adrenotools LANGUAGES CXX C)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+endif()
+
 option(OVERCLOCK_BUILD "Enable aggressive performance flags" OFF)
+
+set(PERF_FLAGS "-O3 -flto -ffast-math -fomit-frame-pointer -funroll-loops -fvectorize -fslp-vectorize")
+set(ARM_TARGET_FLAGS "-march=armv8-a+crypto+crc -mcpu=cortex-a73 -mfpu=neon-fp-armv8")
 
 if(OVERCLOCK_BUILD)
     add_compile_definitions(OVERCLOCK)
+    set(PERF_FLAGS "${PERF_FLAGS} -finline-functions -fgcse-las -fmodulo-sched")
     message(STATUS "Build: Aggressive Overclock Enabled (Heat Warning!)")
 else()
     message(STATUS "Build: Stable Standard Mode")
 endif()
 
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version -flto -Wl,--gc-sections -Wl,-O1")
+set(CMAKE_STATIC_LINKER_FLAGS "${CMAKE_STATIC_LINKER_FLAGS} -flto")
 
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
 
@@ -54,7 +63,9 @@ target_include_directories(adrenotools PRIVATE
     lib/ShadowHook/shadowhook/src/main/cpp/include
     ${bytehook_SOURCE_DIR}/bytehook/src/main/cpp/include
 )
-target_compile_options(adrenotools PRIVATE -Wall -Wextra)
+
+# Apply performance flags to main adrenotools target
+target_compile_options(adrenotools PRIVATE -Wall -Wextra ${PERF_FLAGS} ${ARM_TARGET_FLAGS})
 target_link_libraries(adrenotools android -Wl,--whole-archive linkernsbypass -Wl,--no-whole-archive shadowhook bytehook vulkan)
 
 set_target_properties(adrenotools PROPERTIES
@@ -85,6 +96,8 @@ if(TARGET shadowhook)
         -Wno-reserved-identifier
 		-Wno-unused-macros
         -Wno-error=unused-macros
+        ${PERF_FLAGS}
+        ${ARM_TARGET_FLAGS}
     )
     
     # Force C99 only for ShadowHook's C files
@@ -108,6 +121,8 @@ if(TARGET bytehook)
         -Wno-declaration-after-statement
         -Wno-unsafe-buffer-usage
         -Wno-pre-c11-compat
+        ${PERF_FLAGS}
+        ${ARM_TARGET_FLAGS}
     )
     
     set_target_properties(bytehook PROPERTIES 
