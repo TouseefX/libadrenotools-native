@@ -12,19 +12,22 @@ endif()
 
 option(OVERCLOCK_BUILD "Enable aggressive performance flags" OFF)
 
-set(PERF_FLAGS "-O3 -flto -ffast-math -fomit-frame-pointer -funroll-loops -fvectorize -fslp-vectorize")
-set(ARM_TARGET_FLAGS "-march=armv8-a+crypto+crc -mcpu=cortex-a73 -mfpu=neon-fp-armv8")
+include(CheckIPOSupported)
+check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
+
+set(PERF_FLAGS "-O3" "-ffast-math" "-fomit-frame-pointer" "-funroll-loops" "-fvectorize" "-fslp-vectorize")
+
+set(ARM_TARGET_FLAGS "-march=armv8-a+crypto+crc" "-mcpu=cortex-a73")
 
 if(OVERCLOCK_BUILD)
     add_compile_definitions(OVERCLOCK)
-    set(PERF_FLAGS "${PERF_FLAGS} -finline-functions -fgcse-las -fmodulo-sched")
+    list(APPEND PERF_FLAGS "-finline-functions" "-fgcse-las" "-fmodulo-sched")
     message(STATUS "Build: Aggressive Overclock Enabled (Heat Warning!)")
 else()
     message(STATUS "Build: Stable Standard Mode")
 endif()
 
-set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version -flto -Wl,--gc-sections -Wl,-O1")
-set(CMAKE_STATIC_LINKER_FLAGS "${CMAKE_STATIC_LINKER_FLAGS} -flto")
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--undefined-version -Wl,--gc-sections -Wl,-O1")
 
 set(GEN_INSTALL_TARGET OFF CACHE BOOL "")
 
@@ -64,7 +67,7 @@ target_include_directories(adrenotools PRIVATE
     ${bytehook_SOURCE_DIR}/bytehook/src/main/cpp/include
 )
 
-# Apply performance flags to main adrenotools target
+# Apply optimizations cleanly to the primary target
 target_compile_options(adrenotools PRIVATE -Wall -Wextra ${PERF_FLAGS} ${ARM_TARGET_FLAGS})
 target_link_libraries(adrenotools android -Wl,--whole-archive linkernsbypass -Wl,--no-whole-archive shadowhook bytehook vulkan)
 
@@ -73,6 +76,11 @@ set_target_properties(adrenotools PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
 )
+
+# Enable LTO cleanly on targets if verified available on the host toolchain
+if(lto_supported)
+    set_target_properties(adrenotools PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(shadowhook PRIVATE -Wno-error=unsafe-buffer-usage -Wno-unsafe-buffer-usage)
@@ -105,6 +113,10 @@ if(TARGET shadowhook)
         C_STANDARD 99
         C_STANDARD_REQUIRED ON
     )
+    
+    if(lto_supported)
+        set_target_properties(shadowhook PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
 endif()
 
 if(TARGET bytehook)
@@ -129,6 +141,10 @@ if(TARGET bytehook)
         C_STANDARD 11
         C_STANDARD_REQUIRED ON
     )
+    
+    if(lto_supported)
+        set_target_properties(bytehook PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
 endif()
 
 add_subdirectory(src/hook)
