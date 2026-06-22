@@ -35,7 +35,6 @@ jobs:
           git submodule update --init --recursive
           mkdir build && cd build
           OVERCLOCK_FLAG=${{ github.event.inputs.enable_overclock == 'true' && 'ON' || 'OFF' }}
-          DLOPEN_HOOK_FLAG=${{ github.event.inputs.enable_dlopen_hook == 'true' && 'ON' || 'OFF' }}
           
           cmake .. -Wno-dev \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
