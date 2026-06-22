@@ -43,7 +43,7 @@ jobs:
             -DANDROID_WEAK_API_DEFS=ON \
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
-            -DANDROID_STL=cxx_static \
+            -DANDROID_STL=c++_static \
             -Dlinkernsbypass_BUILD_SHARED=ON \
             -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG
           
