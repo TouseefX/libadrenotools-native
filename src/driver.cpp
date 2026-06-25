@@ -382,31 +382,19 @@ void applyTurnipOptimizations() {
         case 8:
             ALOGI("Adreno 8xx: sysmem + cache-coherent");
             setenv("tu_override_uncached_as_cache_coherent", "true", 1);
-#ifdef OVERCLOCK
-            setenv("TU_DEBUG", "noconform,sysmem,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
-#else
-            setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
-#endif
+            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
             break;
 
         case 7:
             ALOGI("Adreno 7xx: autotuner path");
             setenv("tu_override_uncached_as_cache_coherent", "true", 1);
-#ifdef OVERCLOCK
-            setenv("TU_DEBUG", "noconform,noflushall,hiprio,dynamic,unaligned_store,deck_emu", 1);
-#else
             setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
-#endif
             break;
 
         default:
-            // Adreno 5xx / 6xx — sysmem is more stable on older silicon
             ALOGI("Adreno 5xx/6xx: sysmem stability path");
-#ifdef OVERCLOCK
-            setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,unaligned_store,deck_emu", 1);
-#else
-            setenv("TU_DEBUG", "noconform,sysmem,hiprio,noflushall,dynamic,deck_emu", 1);
-#endif
+			setenv("tu_override_uncached_as_cache_coherent", "true", 1);
+            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
             break;
     }
 }
