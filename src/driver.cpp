@@ -47,6 +47,35 @@
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
 #define MAX_FILENAME_SCAN 512
 
+namespace {
+void *load_libvulkan_from_known_paths(const char *tmpLibDir, int dlopenFlags, android_namespace_t *hookNs) {
+    static constexpr const char *kLibVulkanPaths[] = {
+        "/system/lib64/libvulkan.so",
+        "/system_ext/lib64/libvulkan.so",
+        "/vendor/lib64/libvulkan.so",
+        "/product/lib64/libvulkan.so",
+        "/apex/com.android.vulkan.lib64/libvulkan.so",
+        "/system/lib/libvulkan.so",
+        "/system_ext/lib/libvulkan.so",
+        "/vendor/lib/libvulkan.so",
+        "/product/lib/libvulkan.so",
+        "/apex/com.android.vulkan.lib/libvulkan.so",
+    };
+
+    for (const char *candidate : kLibVulkanPaths) {
+        if (!candidate || access(candidate, F_OK) != 0)
+            continue;
+
+        if (auto handle{linkernsbypass_namespace_dlopen_unique(candidate, tmpLibDir, dlopenFlags, hookNs)})
+            return handle;
+
+        __android_log_print(ANDROID_LOG_WARN, "adrenotools", "Failed to load libvulkan from %s", candidate);
+    }
+
+    return linkernsbypass_namespace_dlopen_unique("libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
+}
+}
+
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
@@ -133,7 +162,7 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
         return nullptr;
     }
 
-    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
+    return load_libvulkan_from_known_paths(tmpLibDir, dlopenFlags, hookNs);
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
