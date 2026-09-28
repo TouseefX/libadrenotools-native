@@ -495,6 +495,8 @@ cleanup:
     free(native_lib_dir);
 }
 
+static void schedule_native_jni_init();
+
 __attribute__((constructor))
 static void global_atomic_init() {
     // ─── Core Mesa/Vulkan env ───
@@ -575,6 +577,10 @@ static void global_atomic_init() {
 
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
     bytehook_init(BYTEHOOK_MODE_MANUAL,     false);
+
+    // If we were dlopen()'d from native code, ART never calls JNI_OnLoad.
+    // This starts a deferred fallback so init still happens in that case.
+    schedule_native_jni_init();
 }
 
 void perform_init(JavaVM* vm) {
@@ -623,8 +629,75 @@ void perform_init(JavaVM* vm) {
     }).detach();
 }
 
+// perform_init() must run exactly once, whether it is triggered by ART's
+// JNI_OnLoad (System.loadLibrary path) or by the native-dlopen fallback below.
+static std::once_flag g_init_once;
+
+static void run_init_once(JavaVM* vm) {
+    std::call_once(g_init_once, [vm]() {
+        g_java_vm = vm;
+        perform_init(vm);
+    });
+}
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
-    g_java_vm = vm;
-    perform_init(vm);
+    run_init_once(vm);
     return JNI_VERSION_1_6;
+}
+
+// ─── Native-dlopen fallback ──────────────────────────────────────────────────
+// ART only calls JNI_OnLoad for System.load/loadLibrary. When another native
+// library dlopen()s us, we look up the already-running JavaVM ourselves.
+static JavaVM* find_created_java_vm() {
+    using GetVMsFn = jint (*)(JavaVM**, jsize, jsize*);
+
+    GetVMsFn fn = reinterpret_cast<GetVMsFn>(dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
+    if (!fn) {
+        for (const char* lib : {"libnativehelper.so", "libart.so"}) {
+            void* h = dlopen(lib, RTLD_NOW | RTLD_NOLOAD);
+            if (!h) h = dlopen(lib, RTLD_NOW);
+            if (!h) continue;
+            fn = reinterpret_cast<GetVMsFn>(dlsym(h, "JNI_GetCreatedJavaVMs"));
+            if (fn) break;
+        }
+    }
+    if (!fn) return nullptr;
+
+    JavaVM* vm = nullptr;
+    jsize count = 0;
+    if (fn(&vm, 1, &count) != JNI_OK || count < 1) return nullptr;
+    return vm;
+}
+
+// Runs on a detached thread. It blocks on the dynamic loader lock until the
+// dlopen() that is running our constructor has finished, so perform_init()
+// never does its own dlopen()s re-entrantly from inside a constructor.
+static void schedule_native_jni_init() {
+    std::thread([]() {
+        JavaVM* vm = nullptr;
+        // The VM exists already if we were loaded from native code; retry
+        // briefly in case we were loaded extremely early in process startup.
+        for (int i = 0; i < 100 && !(vm = find_created_java_vm()); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        if (!vm) {
+            ALOGE("native-load fallback: no JavaVM found, init skipped");
+            return;
+        }
+
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+            if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+                ALOGE("native-load fallback: AttachCurrentThread failed");
+                return;
+            }
+            attached = true;
+        }
+
+        ALOGI("native-load fallback: running init (JNI_OnLoad may not be called)");
+        run_init_once(vm);   // no-op if JNI_OnLoad already ran
+
+        if (attached) vm->DetachCurrentThread();
+    }).detach();
 }
