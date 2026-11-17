@@ -2,78 +2,114 @@
 // Copyright © 2021 Billy Laws
 
 #include <vulkan/vulkan.h>
-#include <fstream>
-#include <string>
-#include <string_view>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <android/api-level.h>
-#include <android/log.h>
-#include <android_linker_ns.h>
+#include <adrenotools/driver.h>
 #include "hook/kgsl.h"
 #include "hook/hook_impl_params.h"
-#include <adrenotools/driver.h>
-#include <unistd.h>
-#include <thread>
-#include <chrono>
-#include <pwd.h>
-#include <cstring>
-#include <cstdlib>
+
+#include <android/api-level.h>
+#include <android/dlext.h>
+#include <android/log.h>
+#include <android_linker_ns.h>
 #include <jni.h>
 #include <shadowhook.h>
-#include <atomic>
-#include <stdatomic.h>
-#include <pthread.h>
-#include <vector>
-#include <mutex>
-#include <bytehook.h>
+
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/system_properties.h>
-#include <iostream>
-#include <android/dlext.h>
-#include <link.h>
-#include <cstdio>
-#include <cstring>
+#include <unistd.h>
+
+#include <atomic>
+#include <cctype>
+#include <chrono>
 #include <cstdint>
-#include <dirent.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
-#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "AdrenoToolsPatch", __VA_ARGS__)
-#define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsPatch", __VA_ARGS__)
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "AdrenoToolsPatch", __VA_ARGS__)
+#define ALOGW(...) __android_log_print(ANDROID_LOG_WARN,  "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
-#define MAX_FILENAME_SCAN 512
 
-// 🟢 PANVK / MALI G52 SUPPORT (Over-cmd)
-extern char **environ; // Acceso directo a la tabla global de entornos de Linux/Android
+// ─── Small string / env helpers ──────────────────────────────────────────────
 
-__attribute__((constructor)) void adrenotools_mali_bridge_init() {
-    // 1. Inyección estándar en el espacio de usuario de C++
-    setenv("PAN_MESA_DEBUG", "kbase", 1);
-    setenv("PAN_EXPERIMENTAL_KBASE_GL", "1", 1);
-    setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1); // ¡Faltaba esta línea crucial!
-    setenv("MESA_LOADER_DRIVER_OVERRIDE", "panfrost", 1);
-    setenv("GALLIUM_DRIVER", "panfrost", 1);
-
-    // 2. Inyección agresiva directo en la RAM global del proceso
-    // Esto asegura que cualquier biblioteca nativa de Android (como el cargador Vulkan)
-    // lea las variables de Panfrost/PanVK sí o sí, sin importar el hilo en el que corra.
-    if (environ) {
-        putenv((char*)"PAN_MESA_DEBUG=kbase");
-        putenv((char*)"PAN_EXPERIMENTAL_KBASE_GL=1");
-        putenv((char*)"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1");
-        putenv((char*)"MESA_LOADER_DRIVER_OVERRIDE=panfrost");
-        putenv((char*)"GALLIUM_DRIVER=panfrost");
+static bool str_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0]) return false;
+    const size_t nlen = std::strlen(needle);
+    for (const char *p = haystack; *p; ++p) {
+        size_t i = 0;
+        while (i < nlen && p[i] &&
+               std::tolower(static_cast<unsigned char>(p[i])) ==
+                   std::tolower(static_cast<unsigned char>(needle[i]))) {
+            ++i;
+        }
+        if (i == nlen) return true;
     }
-
-    __android_log_print(ANDROID_LOG_INFO, "adrenotools", "Bypass de Kbase para Mali G52 Inyectado con Éxito");
+    return false;
 }
 
-// Xiaomi's Hyper OS (and several OEM builds) do not ship libvulkan.so under
-// /system/lib64. Probe the usual vendor locations and fall back to the stock path.
+static bool str_equals_ci(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (std::tolower(static_cast<unsigned char>(*a)) !=
+            std::tolower(static_cast<unsigned char>(*b))) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+// Set default env var without wiping an explicit caller/launcher override.
+static void set_default_env(const char *name, const char *value) {
+    setenv(name, value, 0);
+}
+
+static bool env_is_truthy(const char *name) {
+    const char *v = std::getenv(name);
+    if (!v || !v[0]) return false;
+    return std::strcmp(v, "1") == 0 || str_equals_ci(v, "true") ||
+           str_equals_ci(v, "yes") || str_equals_ci(v, "on");
+}
+
+static std::string ensure_trailing_slash(const char *path) {
+    if (!path || !path[0]) return {};
+    std::string out(path);
+    if (out.back() != '/') out.push_back('/');
+    return out;
+}
+
+static void read_first_line(const char *path, char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+
+    ssize_t n = read(fd, out, out_len - 1);
+    close(fd);
+
+    if (n > 0) {
+        char *nl = static_cast<char *>(std::memchr(out, '\n', static_cast<size_t>(n)));
+        size_t len = nl ? static_cast<size_t>(nl - out) : static_cast<size_t>(n);
+        if (len > 0 && out[len - 1] == '\r') --len;
+        out[len] = '\0';
+    }
+}
+
+// ─── ROM / Vulkan loader path discovery ──────────────────────────────────────
+
+// Xiaomi's HyperOS (and some OEM builds) may place libvulkan.so under vendor/odm.
+// Probe the standard system path first, then known OEM fallback locations.
 static const char *find_libvulkan_path(void) {
     static const char *candidates[] = {
         "/system/lib64/libvulkan.so",
@@ -81,122 +117,220 @@ static const char *find_libvulkan_path(void) {
         "/vendor/lib64/libvulkan.so",
         "/odm/lib64/libvulkan.so",
         "/product/lib64/libvulkan.so",
+        "/system_ext/lib64/libvulkan.so",
         nullptr,
     };
 
-    struct stat st{};
     for (const char **path = candidates; *path != nullptr; ++path) {
-        if (stat(*path, &st) == 0)
+        if (access(*path, R_OK) == 0)
             return *path;
     }
     return candidates[0];
 }
 
-// Log the detected ROM so Hyper OS (Xiaomi) devices are identifiable.
+// Log the detected ROM (checks ro.mi.os.version.* for real HyperOS 1/2/3 builds
+// as well as legacy ro.miui.ui.version.name).
 static void log_detected_rom(void) {
-    char rom[PROP_VALUE_MAX] = {};
-    char brand[PROP_VALUE_MAX] = {};
-    __system_property_get("ro.miui.ui.version.name", rom);
+    char hyperos[PROP_VALUE_MAX] = {};
+    char miui[PROP_VALUE_MAX]    = {};
+    char brand[PROP_VALUE_MAX]   = {};
+
+    __system_property_get("ro.mi.os.version.name", hyperos);
+    if (!hyperos[0])
+        __system_property_get("ro.mi.os.version.code", hyperos);
+    __system_property_get("ro.miui.ui.version.name", miui);
     __system_property_get("ro.product.brand", brand);
-    if (std::strcmp(rom, "Hyper OS") == 0)
-        ALOGI("Hyper OS (Xiaomi) detected - using vendor vulkan path fallback");
-    else if (brand[0])
-        ALOGI("Device brand: %s", brand);
+
+    if (hyperos[0] || std::strcmp(miui, "V816") == 0 || str_contains_ci(miui, "hyper")) {
+        ALOGI("HyperOS (Xiaomi) detected (%s) — loader: %s",
+              hyperos[0] ? hyperos : miui, find_libvulkan_path());
+    } else if (brand[0]) {
+        ALOGI("Device brand: %s — loader: %s", brand, find_libvulkan_path());
+    }
 }
 
-void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
+// ─── GPU family detection (Adreno vs ARM Mali) ───────────────────────────────
+
+static bool detect_mali_gpu_uncached() {
+    // Explicit override: ADRENOTOOLS_FORCE_DRIVER=panvk|mali|turnip|adreno
+    if (const char *forced = std::getenv("ADRENOTOOLS_FORCE_DRIVER")) {
+        if (str_equals_ci(forced, "panvk") || str_equals_ci(forced, "mali") ||
+            str_equals_ci(forced, "panfrost")) {
+            return true;
+        }
+        if (str_equals_ci(forced, "turnip") || str_equals_ci(forced, "adreno") ||
+            str_equals_ci(forced, "freedreno")) {
+            return false;
+        }
+    }
+
+    // Qualcomm KGSL node means Adreno, never Mali.
+    if (access("/dev/kgsl-3d0", F_OK) == 0)
+        return false;
+
+    // ARM Mali kernel driver device nodes (kbase / panfrost / panthor).
+    if (access("/dev/mali0", F_OK) == 0 || access("/dev/mali", F_OK) == 0)
+        return true;
+
+    // World-readable HAL properties set on ARM Mali builds (e.g. Mali-G52).
+    for (const char *propName : {"ro.hardware.vulkan", "ro.hardware.egl"}) {
+        char val[PROP_VALUE_MAX] = {};
+        if (__system_property_get(propName, val) > 0) {
+            if (str_contains_ci(val, "adreno"))
+                return false;
+            if (str_contains_ci(val, "mali") || str_contains_ci(val, "panfrost") ||
+                str_contains_ci(val, "panvk")) {
+                return true;
+            }
+        }
+    }
+
+    // Sysfs / device-tree fallbacks.
+    char info[128] = {};
+    read_first_line("/sys/class/misc/mali0/device/gpuinfo", info, sizeof(info));
+    if (!info[0]) read_first_line("/proc/device-tree/model", info, sizeof(info));
+    if (!info[0]) read_first_line("/sys/firmware/devicetree/base/model", info, sizeof(info));
+
+    return str_contains_ci(info, "mali");
+}
+
+static bool isMaliGpu() {
+    static std::once_flag once;
+    static bool cached = false;
+    std::call_once(once, []() { cached = detect_mali_gpu_uncached(); });
+    return cached;
+}
+
+// ─── Public C API (bylaws/libadrenotools compatible) ─────────────────────────
+
+void *adrenotools_open_libvulkan(int dlopenFlags,
+                                 int featureFlags,
+                                 const char *tmpLibDir,
+                                 const char *hookLibDir,
+                                 const char *customDriverDir,
+                                 const char *customDriverName,
+                                 const char *fileRedirectDir,
+                                 void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
-        ALOGE("FAILURE: Could not load linkernsbypass\n");
+        ALOGE("FAILURE: Could not load linkernsbypass");
         return nullptr;
     }
 
-    if (android_get_device_api_level() >= 29 && !tmpLibDir)
+    if (!hookLibDir || !hookLibDir[0]) {
+        ALOGE("FAILURE: hookLibDir parameter is null or empty");
+        return nullptr;
+    }
+
+    // Always use memfd on Android 10+ (API 29+): avoids SELinux W^X denials when
+    // loading a patched libvulkan.so out of an app's writable cache directory.
+    if (android_get_device_api_level() >= 29)
         tmpLibDir = nullptr;
 
     if (!(featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) && fileRedirectDir) {
-         ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT present but no file redirect folder found\n");
+        ALOGE("FAILURE: fileRedirectDir supplied without ADRENOTOOLS_DRIVER_FILE_REDIRECT");
         return nullptr;
     }
 
     if (!(featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && (customDriverDir || customDriverName)) {
-        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder found\n");
+        ALOGE("FAILURE: customDriver supplied without ADRENOTOOLS_DRIVER_CUSTOM");
         return nullptr;
     }
 
     if (!(featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) && userMappingHandle) {
-        ALOGE("FAILURE: ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT present but no user mapping handle found\n");
+        ALOGE("FAILURE: userMappingHandle supplied without ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT");
         return nullptr;
     }
 
     struct stat buf{};
+    std::string normalizedDriverDir;
 
     if (featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) {
-        if (!customDriverName || !customDriverDir) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but no custom driver name or folder parameter was specified\n");
+        if (!customDriverName || !customDriverName[0] || !customDriverDir || !customDriverDir[0]) {
+            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM set without driver dir/name");
             return nullptr;
         }
 
-        if (stat((std::string(customDriverDir) + customDriverName).c_str(), &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_CUSTOM present but importable driver doesn't exist\n");
+        normalizedDriverDir = ensure_trailing_slash(customDriverDir);
+        const std::string fullDriverPath = normalizedDriverDir + customDriverName;
+        if (stat(fullDriverPath.c_str(), &buf) != 0) {
+            ALOGE("FAILURE: Custom driver not found at %s (errno=%d)", fullDriverPath.c_str(), errno);
             return nullptr;
         }
+        customDriverDir = normalizedDriverDir.c_str();
     }
 
     if (featureFlags & ADRENOTOOLS_DRIVER_FILE_REDIRECT) {
-        if (!fileRedirectDir) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but no folder parameter was found\n");
+        if (!fileRedirectDir || !fileRedirectDir[0]) {
+            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_FILE_REDIRECT set without redirect dir");
             return nullptr;
         }
 
         if (stat(fileRedirectDir, &buf) != 0) {
-            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_REDIRECT_DIR present but specified redirect folder doesn't exist\n");
+            ALOGE("FAILURE: File redirect dir does not exist: %s (errno=%d)", fileRedirectDir, errno);
             return nullptr;
         }
     }
 
-    auto hookNs{android_create_namespace("adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr)};
+    auto hookNs = android_create_namespace(
+        "adrenotools-libvulkan", hookLibDir, nullptr, ANDROID_NAMESPACE_TYPE_SHARED, nullptr, nullptr);
+    if (!hookNs) {
+        ALOGE("FAILURE: android_create_namespace failed for hookLibDir=%s", hookLibDir);
+        return nullptr;
+    }
 
     if (!linkernsbypass_link_namespace_to_default_all_libs(hookNs)) {
+        ALOGE("FAILURE: Failed to link hook namespace to default namespace");
         return nullptr;
     }
 
-    auto hookImpl{linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, hookNs)};
+    auto hookImpl = linkernsbypass_namespace_dlopen("libhook_impl.so", RTLD_NOW, hookNs);
     if (!hookImpl) {
-        ALOGE("FAILURE: Couldn't preload the hook implementation\n");
+        const char *err = dlerror();
+        ALOGE("FAILURE: Couldn't preload libhook_impl.so from %s: %s",
+              hookLibDir, err ? err : "unknown");
         return nullptr;
     }
 
-    auto initHookParam{reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"))};
+    auto initHookParam = reinterpret_cast<void (*)(const void *)>(dlsym(hookImpl, "init_hook_param"));
     if (!initHookParam) {
-        ALOGE("FAILURE: Couldn't init hook params\n");
+        ALOGE("FAILURE: Couldn't resolve init_hook_param in libhook_impl.so");
         return nullptr;
     }
 
-    auto importMapping{[&]() -> adrenotools_gpu_mapping * {
-        if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
-            adrenotools_gpu_mapping *mapping{new adrenotools_gpu_mapping{}};
-            *userMappingHandle = mapping;
-            return mapping;
-        } else {
-        	ALOGW("WARN: Memory mapping flag was not specified\n");
+    adrenotools_gpu_mapping *importMapping = nullptr;
+    if (featureFlags & ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT) {
+        if (!userMappingHandle) {
+            ALOGE("FAILURE: ADRENOTOOLS_DRIVER_GPU_MAPPING_IMPORT set with null userMappingHandle");
             return nullptr;
         }
-    }()};
+        importMapping = new adrenotools_gpu_mapping{};
+        *userMappingHandle = importMapping;
+    }
 
-    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
+    initHookParam(new HookImplParams(
+        featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
 
     if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs)) {
-        ALOGE("FAILURE: Failed to load libvulkan into the isolated namespace\n");
+        const char *err = dlerror();
+        ALOGE("FAILURE: Couldn't load libmain_hook.so from %s: %s",
+              hookLibDir, err ? err : "unknown");
         return nullptr;
     }
 
     log_detected_rom();
 
-    return linkernsbypass_namespace_dlopen_unique(find_libvulkan_path(), tmpLibDir, dlopenFlags, hookNs);
+    const char *vulkanPath = find_libvulkan_path();
+    void *handle = linkernsbypass_namespace_dlopen_unique(vulkanPath, tmpLibDir, dlopenFlags, hookNs);
+    if (!handle) {
+        const char *err = dlerror();
+        ALOGE("FAILURE: Failed to load unique %s: %s", vulkanPath, err ? err : "unknown");
+    }
+    return handle;
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
-    auto importMapping{reinterpret_cast<adrenotools_gpu_mapping *>(handle)};
+    if (!handle || !hostPtr || size == 0) return false;
+    auto importMapping = reinterpret_cast<adrenotools_gpu_mapping *>(handle);
 
     kgsl_gpuobj_import_useraddr addr{
         .virtaddr = reinterpret_cast<uint64_t>(hostPtr),
@@ -211,34 +345,33 @@ bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
 
     kgsl_gpuobj_info info{};
 
-    int kgslFd{open("/dev/kgsl-3d0", O_RDWR)};
+    int kgslFd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
     if (kgslFd < 0)
         return false;
 
-    int ret{ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_IMPORT, &userMemImport)};
-    if (ret)
-        goto err;
+    if (ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_IMPORT, &userMemImport) != 0) {
+        close(kgslFd);
+        return false;
+    }
 
     info.id = userMemImport.id;
-    ret = ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_INFO, &info);
-    if (ret)
-        goto err;
+    if (ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_INFO, &info) != 0) {
+        close(kgslFd);
+        return false;
+    }
 
     importMapping->host_ptr = hostPtr;
     importMapping->gpu_addr = info.gpuaddr;
-    importMapping->size = size;
-    importMapping->flags = 0xc2600;
+    importMapping->size     = size;
+    importMapping->flags    = 0xc2600;
 
     close(kgslFd);
     return true;
-
-err:
-    close(kgslFd);
-    return false;
 }
 
 bool adrenotools_mem_gpu_allocate(void *handle, uint64_t *size) {
-    auto mapping{reinterpret_cast<adrenotools_gpu_mapping *>(handle)};
+    if (!handle || !size || *size == 0) return false;
+    auto mapping = reinterpret_cast<adrenotools_gpu_mapping *>(handle);
 
     kgsl_gpuobj_alloc gpuobjAlloc{};
     gpuobjAlloc.size  = *size;
@@ -247,61 +380,68 @@ bool adrenotools_mem_gpu_allocate(void *handle, uint64_t *size) {
 
     kgsl_gpuobj_info info{};
 
-    int kgslFd{open("/dev/kgsl-3d0", O_RDWR)};
+    int kgslFd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
     if (kgslFd < 0)
         return false;
 
-    int ret{ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_ALLOC, &gpuobjAlloc)};
-    if (ret)
-        goto err;
+    if (ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_ALLOC, &gpuobjAlloc) != 0) {
+        close(kgslFd);
+        return false;
+    }
 
-    *size = gpuobjAlloc.mmapsize;
-
+    *size   = gpuobjAlloc.mmapsize;
     info.id = gpuobjAlloc.id;
 
-    ret = ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_INFO, &info);
-    if (ret)
-        goto err;
+    if (ioctl(kgslFd, IOCTL_KGSL_GPUOBJ_INFO, &info) != 0) {
+        close(kgslFd);
+        return false;
+    }
 
     mapping->host_ptr = nullptr;
     mapping->gpu_addr = info.gpuaddr;
-    mapping->size = *size;
-    mapping->flags = 0xc2600;
+    mapping->size     = *size;
+    mapping->flags    = 0xc2600;
 
     close(kgslFd);
     return true;
-
-err:
-    close(kgslFd);
-    return false;
 }
 
 bool adrenotools_mem_cpu_map(void *handle, void *hostPtr, uint64_t size) {
-    auto mapping{reinterpret_cast<adrenotools_gpu_mapping *>(handle)};
+    if (!handle || size == 0) return false;
+    auto mapping = reinterpret_cast<adrenotools_gpu_mapping *>(handle);
 
-    int kgslFd{open("/dev/kgsl-3d0", O_RDWR)};
+    int kgslFd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
     if (kgslFd < 0)
         return false;
 
-    mapping->host_ptr = mmap(hostPtr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, kgslFd, mapping->gpu_addr);
+    void *mapped = mmap(hostPtr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                        kgslFd, static_cast<off_t>(mapping->gpu_addr));
     close(kgslFd);
-    return mapping->host_ptr != nullptr;
+
+    if (mapped == MAP_FAILED) {
+        mapping->host_ptr = nullptr;
+        return false;
+    }
+
+    mapping->host_ptr = mapped;
+    return true;
 }
 
 bool adrenotools_validate_gpu_mapping(void *handle) {
-    auto importMapping{reinterpret_cast<adrenotools_gpu_mapping *>(handle)};
+    if (!handle) return false;
+    auto importMapping = reinterpret_cast<adrenotools_gpu_mapping *>(handle);
     return importMapping->gpu_addr == ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC;
 }
 
 void adrenotools_set_turbo(bool turbo) {
-    uint32_t enable{turbo ? 0U : 1U};
+    uint32_t enable = turbo ? 0U : 1U;
     kgsl_device_getproperty prop{
-        .type = KGSL_PROP_PWRCTRL,
-        .value = reinterpret_cast<void *>(&enable),
+        .type      = KGSL_PROP_PWRCTRL,
+        .value     = reinterpret_cast<void *>(&enable),
         .sizebytes = sizeof(enable),
     };
 
-    int kgslFd{open("/dev/kgsl-3d0", O_RDWR)};
+    int kgslFd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
     if (kgslFd < 0)
         return;
 
@@ -313,591 +453,924 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
     if (!varName || !value || std::strlen(varName) == 0)
         return false;
 
-    int result = setenv(varName, value, 1);
-    if (result != 0) {
+    if (setenv(varName, value, 1) != 0) {
         ALOGE("FAILURE adrenotools_set_freedreno_env: Failed to set '%s' (errno: %d)", varName, errno);
         return false;
     }
 
     const char *verifyValue = std::getenv(varName);
-    if (verifyValue && std::strcmp(verifyValue, value) == 0) {
+    if (verifyValue && std::strcmp(verifyValue, value) == 0)
         return true;
-    } else {
-        ALOGW("WARN adrenotools_set_freedreno_env: Verification failed for '%s'", varName);
+
+    ALOGW("WARN adrenotools_set_freedreno_env: Verification failed for '%s'", varName);
+    return false;
+}
+
+// ─── Active custom Vulkan loader state & ShadowHook proxies ──────────────────
+//
+// Unified atomic dispatch table shared by both Turnip (Adreno) and PanVK (Mali).
+// ShadowHook proxies MUST:
+//   1. Be __attribute__((noinline)) so __builtin_return_address(0) is always the
+//      return address pushed by ShadowHook's hub trampoline (even under -O3/LTO).
+//   2. Construct SHADOWHOOK_STACK_SCOPE() at the top of the function so the
+//      per-thread recursion-guard frame is popped on EVERY return path.
+//   3. Fall back cleanly via SHADOWHOOK_CALL_PREV() if a pointer is null.
+//
+// ByteHook is intentionally NOT used: intercepting dlopen corrupts caller return
+// addresses that Bionic's linker relies on for namespace resolution.
+
+struct ActiveVulkanDispatch {
+    std::atomic<PFN_vkGetInstanceProcAddr>                getInstanceProcAddr{nullptr};
+    std::atomic<PFN_vkGetDeviceProcAddr>                  getDeviceProcAddr{nullptr};
+    std::atomic<PFN_vkCreateInstance>                     createInstance{nullptr};
+    std::atomic<PFN_vkDestroyInstance>                    destroyInstance{nullptr};
+    std::atomic<PFN_vkEnumerateInstanceVersion>           enumerateInstanceVersion{nullptr};
+    std::atomic<PFN_vkEnumerateInstanceExtensionProperties> enumerateInstanceExtensionProperties{nullptr};
+    std::atomic<PFN_vkEnumerateInstanceLayerProperties>   enumerateInstanceLayerProperties{nullptr};
+    std::atomic<PFN_vkCreateDevice>                       createDevice{nullptr};
+    std::atomic<PFN_vkDestroyDevice>                      destroyDevice{nullptr};
+    std::atomic<PFN_vkEnumerateDeviceExtensionProperties> enumerateDeviceExtensionProperties{nullptr};
+    std::atomic<PFN_vkEnumerateDeviceLayerProperties>     enumerateDeviceLayerProperties{nullptr};
+};
+
+static ActiveVulkanDispatch g_vk;
+
+static void *g_turnip_handle = nullptr;
+static void *g_panvk_handle  = nullptr;
+static std::mutex g_driver_mutex;
+static std::vector<void *> g_shadow_stubs;
+
+__attribute__((noinline))
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL hooked_vkGetInstanceProcAddr(
+    VkInstance instance, const char *pName) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.getInstanceProcAddr.load(std::memory_order_acquire);
+    if (fn) return fn(instance, pName);
+    return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL hooked_vkGetDeviceProcAddr(
+    VkDevice device, const char *pName) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.getDeviceProcAddr.load(std::memory_order_acquire);
+    if (fn) return fn(device, pName);
+    return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkCreateInstance(
+    const VkInstanceCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkInstance *pInstance) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.createInstance.load(std::memory_order_acquire);
+    if (fn) return fn(pCreateInfo, pAllocator, pInstance);
+    return SHADOWHOOK_CALL_PREV(hooked_vkCreateInstance, pCreateInfo, pAllocator, pInstance);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR void VKAPI_CALL hooked_vkDestroyInstance(
+    VkInstance instance, const VkAllocationCallbacks *pAllocator) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.destroyInstance.load(std::memory_order_acquire);
+    if (fn) {
+        fn(instance, pAllocator);
+        return;
+    }
+    SHADOWHOOK_CALL_PREV(hooked_vkDestroyInstance, instance, pAllocator);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateInstanceVersion(
+    uint32_t *pApiVersion) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.enumerateInstanceVersion.load(std::memory_order_acquire);
+    if (fn) return fn(pApiVersion);
+    return SHADOWHOOK_CALL_PREV(hooked_vkEnumerateInstanceVersion, pApiVersion);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateInstanceExtensionProperties(
+    const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.enumerateInstanceExtensionProperties.load(std::memory_order_acquire);
+    if (fn) return fn(pLayerName, pPropertyCount, pProperties);
+    return SHADOWHOOK_CALL_PREV(
+        hooked_vkEnumerateInstanceExtensionProperties, pLayerName, pPropertyCount, pProperties);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateInstanceLayerProperties(
+    uint32_t *pPropertyCount, VkLayerProperties *pProperties) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.enumerateInstanceLayerProperties.load(std::memory_order_acquire);
+    if (fn) return fn(pPropertyCount, pProperties);
+    return SHADOWHOOK_CALL_PREV(
+        hooked_vkEnumerateInstanceLayerProperties, pPropertyCount, pProperties);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkCreateDevice(
+    VkPhysicalDevice physicalDevice,
+    const VkDeviceCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDevice *pDevice) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.createDevice.load(std::memory_order_acquire);
+    if (fn) return fn(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    return SHADOWHOOK_CALL_PREV(
+        hooked_vkCreateDevice, physicalDevice, pCreateInfo, pAllocator, pDevice);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR void VKAPI_CALL hooked_vkDestroyDevice(
+    VkDevice device, const VkAllocationCallbacks *pAllocator) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.destroyDevice.load(std::memory_order_acquire);
+    if (fn) {
+        fn(device, pAllocator);
+        return;
+    }
+    SHADOWHOOK_CALL_PREV(hooked_vkDestroyDevice, device, pAllocator);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice,
+    const char *pLayerName,
+    uint32_t *pPropertyCount,
+    VkExtensionProperties *pProperties) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.enumerateDeviceExtensionProperties.load(std::memory_order_acquire);
+    if (fn) return fn(physicalDevice, pLayerName, pPropertyCount, pProperties);
+    return SHADOWHOOK_CALL_PREV(
+        hooked_vkEnumerateDeviceExtensionProperties,
+        physicalDevice, pLayerName, pPropertyCount, pProperties);
+}
+
+__attribute__((noinline))
+static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateDeviceLayerProperties(
+    VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount, VkLayerProperties *pProperties) {
+    SHADOWHOOK_STACK_SCOPE();
+    auto fn = g_vk.enumerateDeviceLayerProperties.load(std::memory_order_acquire);
+    if (fn) return fn(physicalDevice, pPropertyCount, pProperties);
+    return SHADOWHOOK_CALL_PREV(
+        hooked_vkEnumerateDeviceLayerProperties, physicalDevice, pPropertyCount, pProperties);
+}
+
+static bool ensure_shadowhook_ready() {
+    int err = shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+    if (err != SHADOWHOOK_ERRNO_OK) {
+        ALOGE("shadowhook_init failed (%d): %s", err, shadowhook_to_errmsg(err));
         return false;
     }
+    return true;
 }
 
-static void *g_turnip_handle = NULL;
-static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
-static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
-
-// 🟢 PANVK / MALI G52 DRIVER HANDLE (Over-cmd / Mesa PanVK)
-static void *g_panvk_handle = NULL;
-static PFN_vkGetInstanceProcAddr g_panvk_gipa = NULL;
-static PFN_vkGetDeviceProcAddr g_panvk_gdpa = nullptr;
-
-static JavaVM* g_java_vm = nullptr;
-
-__attribute__((always_inline))
-static inline PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
-    return g_turnip_gipa(instance, pName);
-	SHADOWHOOK_POP_STACK();
+template <typename Fn>
+static Fn resolve_loader_sym(void *loader_handle,
+                             PFN_vkGetInstanceProcAddr gipa,
+                             const char *name) {
+    void *sym = dlsym(loader_handle, name);
+    if (!sym && gipa)
+        sym = reinterpret_cast<void *>(gipa(VK_NULL_HANDLE, name));
+    return reinterpret_cast<Fn>(sym);
 }
 
-__attribute__((always_inline))
-static inline PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
-    return g_turnip_gdpa(device, pName);
-	SHADOWHOOK_POP_STACK();
+static bool populate_active_dispatch(void *loader_handle) {
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        dlsym(loader_handle, "vkGetInstanceProcAddr"));
+    auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        dlsym(loader_handle, "vkGetDeviceProcAddr"));
+
+    if (!gipa || !gdpa) {
+        ALOGE("Failed to resolve vkGetInstanceProcAddr/vkGetDeviceProcAddr from custom loader");
+        return false;
+    }
+
+    g_vk.getInstanceProcAddr.store(gipa, std::memory_order_release);
+    g_vk.getDeviceProcAddr.store(gdpa, std::memory_order_release);
+    g_vk.createInstance.store(
+        resolve_loader_sym<PFN_vkCreateInstance>(loader_handle, gipa, "vkCreateInstance"),
+        std::memory_order_release);
+    g_vk.destroyInstance.store(
+        resolve_loader_sym<PFN_vkDestroyInstance>(loader_handle, gipa, "vkDestroyInstance"),
+        std::memory_order_release);
+    g_vk.enumerateInstanceVersion.store(
+        resolve_loader_sym<PFN_vkEnumerateInstanceVersion>(
+            loader_handle, gipa, "vkEnumerateInstanceVersion"),
+        std::memory_order_release);
+    g_vk.enumerateInstanceExtensionProperties.store(
+        resolve_loader_sym<PFN_vkEnumerateInstanceExtensionProperties>(
+            loader_handle, gipa, "vkEnumerateInstanceExtensionProperties"),
+        std::memory_order_release);
+    g_vk.enumerateInstanceLayerProperties.store(
+        resolve_loader_sym<PFN_vkEnumerateInstanceLayerProperties>(
+            loader_handle, gipa, "vkEnumerateInstanceLayerProperties"),
+        std::memory_order_release);
+    g_vk.createDevice.store(
+        resolve_loader_sym<PFN_vkCreateDevice>(loader_handle, nullptr, "vkCreateDevice"),
+        std::memory_order_release);
+    g_vk.destroyDevice.store(
+        resolve_loader_sym<PFN_vkDestroyDevice>(loader_handle, nullptr, "vkDestroyDevice"),
+        std::memory_order_release);
+    g_vk.enumerateDeviceExtensionProperties.store(
+        resolve_loader_sym<PFN_vkEnumerateDeviceExtensionProperties>(
+            loader_handle, nullptr, "vkEnumerateDeviceExtensionProperties"),
+        std::memory_order_release);
+    g_vk.enumerateDeviceLayerProperties.store(
+        resolve_loader_sym<PFN_vkEnumerateDeviceLayerProperties>(
+            loader_handle, nullptr, "vkEnumerateDeviceLayerProperties"),
+        std::memory_order_release);
+
+    return true;
+}
+
+// Must be called with g_driver_mutex held.
+static void clear_vulkan_hooks_locked() {
+    for (void *stub : g_shadow_stubs) {
+        if (stub) shadowhook_unhook(stub);
+    }
+    g_shadow_stubs.clear();
+}
+
+// Hook system libvulkan.so symbols by exact address so ShadowHook never matches
+// private memfd/patched copies opened via adrenotools_open_libvulkan().
+// Must be called with g_driver_mutex held.
+static bool install_vulkan_hooks_locked() {
+    if (!ensure_shadowhook_ready())
+        return false;
+
+    clear_vulkan_hooks_locked();
+
+    // Open the default-namespace system libvulkan.so so its symbols are pinned
+    // and resolved directly (not our isolated RTLD_LOCAL custom loader).
+    void *sys_vk = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!sys_vk)
+        sys_vk = dlopen(find_libvulkan_path(), RTLD_NOW | RTLD_LOCAL);
+
+    struct HookEntry {
+        const char *name;
+        void       *proxy;
+        void       *custom_target;
+        bool        required;
+    };
+
+    const HookEntry entries[] = {
+        {"vkGetInstanceProcAddr",
+         reinterpret_cast<void *>(hooked_vkGetInstanceProcAddr),
+         reinterpret_cast<void *>(g_vk.getInstanceProcAddr.load(std::memory_order_relaxed)),
+         true},
+        {"vkGetDeviceProcAddr",
+         reinterpret_cast<void *>(hooked_vkGetDeviceProcAddr),
+         reinterpret_cast<void *>(g_vk.getDeviceProcAddr.load(std::memory_order_relaxed)),
+         true},
+        {"vkCreateInstance",
+         reinterpret_cast<void *>(hooked_vkCreateInstance),
+         reinterpret_cast<void *>(g_vk.createInstance.load(std::memory_order_relaxed)),
+         false},
+        {"vkDestroyInstance",
+         reinterpret_cast<void *>(hooked_vkDestroyInstance),
+         reinterpret_cast<void *>(g_vk.destroyInstance.load(std::memory_order_relaxed)),
+         false},
+        {"vkEnumerateInstanceVersion",
+         reinterpret_cast<void *>(hooked_vkEnumerateInstanceVersion),
+         reinterpret_cast<void *>(g_vk.enumerateInstanceVersion.load(std::memory_order_relaxed)),
+         false},
+        {"vkEnumerateInstanceExtensionProperties",
+         reinterpret_cast<void *>(hooked_vkEnumerateInstanceExtensionProperties),
+         reinterpret_cast<void *>(
+             g_vk.enumerateInstanceExtensionProperties.load(std::memory_order_relaxed)),
+         false},
+        {"vkEnumerateInstanceLayerProperties",
+         reinterpret_cast<void *>(hooked_vkEnumerateInstanceLayerProperties),
+         reinterpret_cast<void *>(
+             g_vk.enumerateInstanceLayerProperties.load(std::memory_order_relaxed)),
+         false},
+        {"vkCreateDevice",
+         reinterpret_cast<void *>(hooked_vkCreateDevice),
+         reinterpret_cast<void *>(g_vk.createDevice.load(std::memory_order_relaxed)),
+         false},
+        {"vkDestroyDevice",
+         reinterpret_cast<void *>(hooked_vkDestroyDevice),
+         reinterpret_cast<void *>(g_vk.destroyDevice.load(std::memory_order_relaxed)),
+         false},
+        {"vkEnumerateDeviceExtensionProperties",
+         reinterpret_cast<void *>(hooked_vkEnumerateDeviceExtensionProperties),
+         reinterpret_cast<void *>(
+             g_vk.enumerateDeviceExtensionProperties.load(std::memory_order_relaxed)),
+         false},
+        {"vkEnumerateDeviceLayerProperties",
+         reinterpret_cast<void *>(hooked_vkEnumerateDeviceLayerProperties),
+         reinterpret_cast<void *>(
+             g_vk.enumerateDeviceLayerProperties.load(std::memory_order_relaxed)),
+         false},
+    };
+
+    bool ok = true;
+    for (const auto &e : entries) {
+        if (!e.custom_target)
+            continue;
+
+        void *stub = nullptr;
+        if (sys_vk) {
+            void *sys_sym = dlsym(sys_vk, e.name);
+            if (!sys_sym) {
+                if (e.required) {
+                    ALOGE("System libvulkan.so missing required symbol %s", e.name);
+                    ok = false;
+                }
+                continue;
+            }
+            if (sys_sym == e.custom_target) {
+                ALOGW("Skipping hook on %s: system symbol aliases custom loader", e.name);
+                continue;
+            }
+            stub = shadowhook_hook_sym_addr_2(
+                sys_sym, e.proxy, nullptr, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
+        } else {
+            stub = shadowhook_hook_sym_name_2(
+                "libvulkan.so", e.name, e.proxy, nullptr, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
+        }
+
+        if (stub) {
+            g_shadow_stubs.push_back(stub);
+        } else {
+            int err = shadowhook_get_errno();
+            if (err == SHADOWHOOK_ERRNO_PENDING) {
+                ALOGI("ShadowHook pending for %s", e.name);
+            } else {
+                ALOGW("ShadowHook failed for %s (%d): %s",
+                      e.name, err, shadowhook_to_errmsg(err));
+                if (e.required) ok = false;
+            }
+        }
+    }
+
+    ALOGI("Installed %zu ShadowHook Vulkan hooks", g_shadow_stubs.size());
+    return ok;
+}
+
+// ─── JNI & path resolution helpers ───────────────────────────────────────────
+
+static bool check_and_clear_jni_exception(JNIEnv *env) {
+    if (env && env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return true;
+    }
+    return false;
 }
 
 struct CachedJNI {
-    jclass  contextClass   = nullptr;
-    jclass  appInfoClass   = nullptr;
-    jclass  fileClass      = nullptr;
+    jclass    contextClass = nullptr;
+    jclass    appInfoClass = nullptr;
+    jclass    fileClass    = nullptr;
     jmethodID getAppInfo   = nullptr;
     jmethodID getCacheDir  = nullptr;
     jmethodID getAbsPath   = nullptr;
     jfieldID  nativeLibDir = nullptr;
-    bool ready             = false;
+    bool      ready        = false;
 };
-static CachedJNI g_jni_cache;
 
-static void prime_jni_cache(JNIEnv* env) {
-    if (g_jni_cache.ready) return;
+static CachedJNI  g_jni_cache;
+static std::mutex g_jni_cache_mutex;
 
-    jclass ctx  = env->FindClass("android/content/Context");
-    jclass ai   = env->FindClass("android/content/pm/ApplicationInfo");
+static bool prime_jni_cache(JNIEnv *env) {
+    if (!env) return false;
+
+    std::lock_guard<std::mutex> lock(g_jni_cache_mutex);
+    if (g_jni_cache.ready) return true;
+
+    jclass ctx = env->FindClass("android/content/Context");
+    if (check_and_clear_jni_exception(env) || !ctx) return false;
+
+    jclass ai = env->FindClass("android/content/pm/ApplicationInfo");
+    if (check_and_clear_jni_exception(env) || !ai) {
+        env->DeleteLocalRef(ctx);
+        return false;
+    }
+
     jclass file = env->FindClass("java/io/File");
+    if (check_and_clear_jni_exception(env) || !file) {
+        env->DeleteLocalRef(ctx);
+        env->DeleteLocalRef(ai);
+        return false;
+    }
 
-    if (!ctx || !ai || !file) return;
+    jmethodID getAppInfo   = env->GetMethodID(ctx,  "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+    check_and_clear_jni_exception(env);
+    jmethodID getCacheDir  = env->GetMethodID(ctx,  "getCacheDir",        "()Ljava/io/File;");
+    check_and_clear_jni_exception(env);
+    jfieldID  nativeLibDir = env->GetFieldID (ai,   "nativeLibraryDir",   "Ljava/lang/String;");
+    check_and_clear_jni_exception(env);
+    jmethodID getAbsPath   = env->GetMethodID(file, "getAbsolutePath",    "()Ljava/lang/String;");
+    check_and_clear_jni_exception(env);
 
-    g_jni_cache.contextClass   = (jclass)env->NewGlobalRef(ctx);
-    g_jni_cache.appInfoClass   = (jclass)env->NewGlobalRef(ai);
-    g_jni_cache.fileClass      = (jclass)env->NewGlobalRef(file);
-
-    g_jni_cache.getAppInfo     = env->GetMethodID(ctx,  "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
-    g_jni_cache.getCacheDir    = env->GetMethodID(ctx,  "getCacheDir",        "()Ljava/io/File;");
-    g_jni_cache.nativeLibDir   = env->GetFieldID (ai,   "nativeLibraryDir",   "Ljava/lang/String;");
-    g_jni_cache.getAbsPath     = env->GetMethodID(file, "getAbsolutePath",    "()Ljava/lang/String;");
+    if (getAppInfo && getCacheDir && nativeLibDir && getAbsPath) {
+        g_jni_cache.contextClass = static_cast<jclass>(env->NewGlobalRef(ctx));
+        g_jni_cache.appInfoClass = static_cast<jclass>(env->NewGlobalRef(ai));
+        g_jni_cache.fileClass    = static_cast<jclass>(env->NewGlobalRef(file));
+        g_jni_cache.getAppInfo   = getAppInfo;
+        g_jni_cache.getCacheDir  = getCacheDir;
+        g_jni_cache.nativeLibDir = nativeLibDir;
+        g_jni_cache.getAbsPath   = getAbsPath;
+        g_jni_cache.ready        = true;
+    }
 
     env->DeleteLocalRef(ctx);
     env->DeleteLocalRef(ai);
     env->DeleteLocalRef(file);
 
-    g_jni_cache.ready = true;
+    return g_jni_cache.ready;
 }
 
-static char* get_native_library_dir(JNIEnv* env, jobject context) {
-    if (!context) return nullptr;
+static std::string jstring_to_std(JNIEnv *env, jstring jstr) {
+    if (!env || !jstr) return {};
+    const char *chars = env->GetStringUTFChars(jstr, nullptr);
+    if (!chars) {
+        check_and_clear_jni_exception(env);
+        return {};
+    }
+    std::string out(chars);
+    env->ReleaseStringUTFChars(jstr, chars);
+    return out;
+}
 
-    prime_jni_cache(env);
-    if (!g_jni_cache.ready) return nullptr;
+static std::string get_native_library_dir_jni(JNIEnv *env, jobject context) {
+    if (!env || !context || !prime_jni_cache(env)) return {};
 
     jobject appInfo = env->CallObjectMethod(context, g_jni_cache.getAppInfo);
-    if (!appInfo) return nullptr;
+    if (check_and_clear_jni_exception(env) || !appInfo) return {};
 
-    jstring jPath = (jstring)env->GetObjectField(appInfo, g_jni_cache.nativeLibDir);
+    jstring jPath = static_cast<jstring>(env->GetObjectField(appInfo, g_jni_cache.nativeLibDir));
     env->DeleteLocalRef(appInfo);
-    if (!jPath) return nullptr;
+    if (check_and_clear_jni_exception(env) || !jPath) return {};
 
-    const char* path_chars = env->GetStringUTFChars(jPath, nullptr);
-    char* result = path_chars ? strdup(path_chars) : nullptr;
-    if (path_chars) env->ReleaseStringUTFChars(jPath, path_chars);
+    std::string result = jstring_to_std(env, jPath);
     env->DeleteLocalRef(jPath);
-
     return result;
 }
 
-static void read_first_line(const char* path, char* out, size_t out_len) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return;
-
-    ssize_t n = read(fd, out, out_len - 1);
-    close(fd);
-
-    if (n > 0) {
-        // strip newline
-        char* nl = (char*)memchr(out, '\n', n);
-        out[nl ? (nl - out) : n] = '\0';
+// Pure-native fallback via dladdr() if Context isn't ready yet.
+static std::string get_self_library_dir() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void *>(&adrenotools_open_libvulkan), &info) == 0 ||
+        !info.dli_fname) {
+        return {};
     }
+    if (std::strstr(info.dli_fname, "!/") != nullptr) {
+        ALOGE("libadrenotools.so was loaded unextracted from APK (%s); "
+              "set android:extractNativeLibs=\"true\" / useLegacyPackaging = true",
+              info.dli_fname);
+        return {};
+    }
+    const char *slash = std::strrchr(info.dli_fname, '/');
+    if (!slash || slash == info.dli_fname) return {};
+    return std::string(info.dli_fname, static_cast<size_t>(slash - info.dli_fname));
 }
 
-void applyTurnipOptimizations() {
+static std::string get_cache_dir_jni(JNIEnv *env, jobject context) {
+    if (!env || !context || !prime_jni_cache(env)) return {};
+
+    jobject cacheFile = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
+    if (check_and_clear_jni_exception(env) || !cacheFile) return {};
+
+    jstring jPath = static_cast<jstring>(env->CallObjectMethod(cacheFile, g_jni_cache.getAbsPath));
+    env->DeleteLocalRef(cacheFile);
+    if (check_and_clear_jni_exception(env) || !jPath) return {};
+
+    std::string result = jstring_to_std(env, jPath);
+    env->DeleteLocalRef(jPath);
+    return result;
+}
+
+// ─── Per-GPU environment tuning ──────────────────────────────────────────────
+
+static int parse_adreno_generation(const char *str) {
+    if (!str || !str[0]) return 0;
+    const char *p = str;
+    // Skip past "Adreno" prefix when present so SoC strings like "SM8250" don't
+    // misclassify an Adreno 650 as Adreno 8xx.
+    for (const char *q = str; *q; ++q) {
+        if (std::tolower(static_cast<unsigned char>(q[0])) == 'a' &&
+            std::tolower(static_cast<unsigned char>(q[1])) == 'd' &&
+            std::tolower(static_cast<unsigned char>(q[2])) == 'r' &&
+            std::tolower(static_cast<unsigned char>(q[3])) == 'e' &&
+            std::tolower(static_cast<unsigned char>(q[4])) == 'n' &&
+            std::tolower(static_cast<unsigned char>(q[5])) == 'o') {
+            p = q + 6;
+            break;
+        }
+    }
+    while (*p && !std::isdigit(static_cast<unsigned char>(*p))) ++p;
+    if (*p >= '5' && *p <= '9')
+        return *p - '0';
+    return 0;
+}
+
+static void applyTurnipOptimizations() {
     char gpuName[64] = {};
+    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
 
-    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model",           gpuName, sizeof(gpuName));
-    if (!gpuName[0]) read_first_line("/proc/device-tree/model",     gpuName, sizeof(gpuName));
-    if (!gpuName[0]) read_first_line("/sys/firmware/devicetree/base/model", gpuName, sizeof(gpuName));
+    int gen = parse_adreno_generation(gpuName);
+    if (gen == 0) {
+        char model[128] = {};
+        read_first_line("/proc/device-tree/model", model, sizeof(model));
+        if (!model[0]) read_first_line("/sys/firmware/devicetree/base/model", model, sizeof(model));
+        if (str_contains_ci(model, "adreno"))
+            gen = parse_adreno_generation(model);
+    }
 
-    if (!gpuName[0]) {
-        // Unknown GPU — safe conservative fallback
+    if (gen == 0) {
 #ifdef OVERCLOCK
-        setenv("TU_DEBUG", "noconform,noflushall,dynamic,unaligned_store,deck_emu,forcecb", 1);
+        set_default_env("TU_DEBUG", "noconform,noflushall,dynamic,unaligned_store,deck_emu,forcecb");
 #else
-        setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu,forcecb", 1);
+        set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu,forcecb");
 #endif
         return;
-    }
-	
-    int gen = 0;
-    for (const char* p = gpuName; *p; ++p) {
-        if (*p >= '5' && *p <= '8') { gen = *p - '0'; break; }
     }
 
     switch (gen) {
         case 8:
-            ALOGI("Adreno 8xx: sysmem + cache-coherent");
-            setenv("tu_override_uncached_as_cache_coherent", "true", 1);
-            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
+            ALOGI("Adreno 8xx (%s): sysmem + cache-coherent", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+            set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu");
             break;
 
         case 7:
-            ALOGI("Adreno 7xx: autotuner path");
-            setenv("tu_override_uncached_as_cache_coherent", "true", 1);
-            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
+            ALOGI("Adreno 7xx (%s): autotuner path", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+            set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu");
             break;
 
         default:
-            ALOGI("Adreno 5xx/6xx: sysmem stability path");
-			setenv("tu_override_uncached_as_cache_coherent", "true", 1);
-            setenv("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu", 1);
+            ALOGI("Adreno 5xx/6xx (%s): stability path", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+            set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu");
             break;
     }
 }
 
-// 🟢 PANVK / MALI G52 OPTIMIZATIONS (Over-cmd / Mesa PanVK)
-// Detects Mali GPU and applies PanVK-specific environment tweaks.
+// PanVK / ARM Mali (e.g. Mali-G52) environment configuration.
+// Only sets Panfrost/PanVK overrides when actually initializing for Mali so
+// Adreno devices never inherit MESA_LOADER_DRIVER_OVERRIDE=panfrost.
 static void applyPanvkOptimizations() {
-    char gpuName[64] = {};
+    char gpuInfo[128] = {};
+    read_first_line("/sys/class/misc/mali0/device/gpuinfo", gpuInfo, sizeof(gpuInfo));
 
-    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
-    if (!gpuName[0]) read_first_line("/proc/device-tree/model", gpuName, sizeof(gpuName));
-    if (!gpuName[0]) read_first_line("/sys/firmware/devicetree/base/model", gpuName, sizeof(gpuName));
+    set_default_env("PAN_MESA_DEBUG", "kbase");
+    set_default_env("PAN_EXPERIMENTAL_KBASE_GL", "1");
+    set_default_env("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1");
+    set_default_env("MESA_LOADER_DRIVER_OVERRIDE", "panfrost");
+    set_default_env("GALLIUM_DRIVER", "panfrost");
+    set_default_env("PAN_VK_DEBUG", "sync");
 
-    // PanVK targets ARM Mali. Check for Mali in the GPU name.
-    bool isMali = (strstr(gpuName, "Mali") != nullptr || strstr(gpuName, "mali") != nullptr);
+    if (gpuInfo[0])
+        ALOGI("PanVK: Mali GPU environment configured (%s)", gpuInfo);
+    else
+        ALOGI("PanVK: Mali GPU environment configured");
+}
 
-    if (!gpuName[0]) {
-        // Unknown GPU — set conservative PanVK defaults anyway
-        setenv("PAN_MESA_DEBUG", "kbase", 1);
-        setenv("PAN_VK_DEBUG", "sync", 1);
-        ALOGI("PanVK: unknown GPU, using conservative defaults");
+// ─── Turnip & PanVK initialization ───────────────────────────────────────────
+
+enum class DriverKind {
+    Turnip,
+    PanVK,
+};
+
+static void init_custom_driver(JNIEnv *env, jobject context, DriverKind kind) {
+    std::lock_guard<std::mutex> lock(g_driver_mutex);
+
+    const bool   is_panvk     = (kind == DriverKind::PanVK);
+    const char  *label        = is_panvk ? "PanVK" : "Turnip";
+    const char  *icd_select   = is_panvk ? "panvk" : "turnip";
+    const char  *default_so   = is_panvk ? "libvulkan_panfrost.so" : "libvulkan_freedreno.so";
+    const char  *tmp_subdir   = is_panvk ? "panvk_tmp" : "turnip_tmp";
+    const char  *cache_subdir = is_panvk ? "panvk_shader_cache" : "turnip_shader_cache";
+    void       *&slot_handle  = is_panvk ? g_panvk_handle : g_turnip_handle;
+
+    if (is_panvk)
+        applyPanvkOptimizations();
+
+    // If this driver is already loaded, refresh the active dispatch and re-hook.
+    if (slot_handle != nullptr) {
+        ALOGI("%s: reusing existing loader handle and refreshing hooks", label);
+        if (populate_active_dispatch(slot_handle))
+            install_vulkan_hooks_locked();
         return;
     }
 
-    if (isMali) {
-        ALOGI("PanVK: Mali GPU detected (%s)", gpuName);
-        setenv("PAN_MESA_DEBUG", "kbase", 1);
-        setenv("PAN_EXPERIMENTAL_KBASE_GL", "1", 1);
-        setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
-        setenv("MESA_LOADER_DRIVER_OVERRIDE", "panfrost", 1);
-        setenv("GALLIUM_DRIVER", "panfrost", 1);
-        setenv("PAN_VK_DEBUG", "sync", 1);
+    // Resolve hook directory: ADRENOTOOLS_HOOK_DIR -> Context.nativeLibraryDir -> dladdr().
+    std::string hook_dir;
+    if (const char *env_hook = std::getenv("ADRENOTOOLS_HOOK_DIR"); env_hook && env_hook[0]) {
+        hook_dir = env_hook;
+        while (hook_dir.size() > 1 && hook_dir.back() == '/') hook_dir.pop_back();
     } else {
-        ALOGI("PanVK: non-Mali GPU detected (%s) — PanVK may not work", gpuName);
+        hook_dir = get_native_library_dir_jni(env, context);
+        if (hook_dir.empty())
+            hook_dir = get_self_library_dir();
     }
-}
 
-static void* g_shadow_stub_gipa = nullptr;
-static void* g_shadow_stub_gdpa = nullptr;
-
-static void init_turnip_driver(JNIEnv* env, jobject context) {
-    if (g_turnip_handle != nullptr) {
-        ALOGI("init_turnip_driver: re-hooking existing handle");
-
-        if (g_shadow_stub_gipa) { shadowhook_unhook(g_shadow_stub_gipa); g_shadow_stub_gipa = nullptr; }
-        if (g_shadow_stub_gdpa) { shadowhook_unhook(g_shadow_stub_gdpa); g_shadow_stub_gdpa = nullptr; }
-
-        g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
-        return;
-    }
-	
-    char fixed_dir[512]  = {};
-    char tmpdir[512]     = {};
-    char cache_dir[512]  = {};
-
-    char* native_lib_dir = get_native_library_dir(env, context);
-    if (!native_lib_dir) {
-        ALOGE("init_turnip_driver: could not resolve native lib dir");
+    if (hook_dir.empty()) {
+        ALOGE("%s: could not resolve native library directory", label);
         return;
     }
 
-    snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
-    ALOGI("Native Lib Dir: %s", fixed_dir);
-setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
-    setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
-	
-    prime_jni_cache(env);
-    jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
-    jstring jPath        = (jstring)env->CallObjectMethod(cacheFileObj, g_jni_cache.getAbsPath);
+    // Resolve driver directory: ADRENOTOOLS_DRIVER_DIR -> ADRENOTOOLS_DRIVER_PATH -> hook_dir/.
+    const char *env_drv_dir = std::getenv("ADRENOTOOLS_DRIVER_DIR");
+    if (!env_drv_dir || !env_drv_dir[0])
+        env_drv_dir = std::getenv("ADRENOTOOLS_DRIVER_PATH");
+    std::string driver_dir = ensure_trailing_slash(
+        (env_drv_dir && env_drv_dir[0]) ? env_drv_dir : hook_dir.c_str());
 
-    const char* base_cache_path = env->GetStringUTFChars(jPath, nullptr);
+    // Resolve driver library name: ADRENOTOOLS_DRIVER_NAME -> default Turnip/PanVK soname.
+    const char *env_drv_name = std::getenv("ADRENOTOOLS_DRIVER_NAME");
+    const char *driver_name  = (env_drv_name && env_drv_name[0]) ? env_drv_name : default_so;
 
-    snprintf(tmpdir,    sizeof(tmpdir),    "%s/turnip_tmp/",          base_cache_path);
-    snprintf(cache_dir, sizeof(cache_dir), "%s/turnip_shader_cache/", base_cache_path);
-	
-    struct stat st;
-    if (stat(tmpdir,    &st) != 0) mkdir(tmpdir,    0775);
-    if (stat(cache_dir, &st) != 0) mkdir(cache_dir, 0775);
+    ALOGI("%s: hookDir=%s driver=%s%s", label, hook_dir.c_str(), driver_dir.c_str(), driver_name);
 
-    setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
+    setenv("MESA_LIBGL_DRIVERS_PATH", driver_dir.c_str(), 1);
+    setenv("MESA_VULKAN_ICD_SELECT",  icd_select,         1);
 
-    g_turnip_handle = adrenotools_open_libvulkan(
-        RTLD_GLOBAL | RTLD_NOW,
+    // Set up shader cache & legacy (< API 29) tmp directory when Context is available.
+    std::string tmp_dir;
+    std::string base_cache = get_cache_dir_jni(env, context);
+    if (!base_cache.empty()) {
+        tmp_dir               = base_cache + "/" + tmp_subdir + "/";
+        std::string cache_dir = base_cache + "/" + cache_subdir + "/";
+
+        struct stat st{};
+        if (stat(tmp_dir.c_str(), &st) != 0)   mkdir(tmp_dir.c_str(),   0775);
+        if (stat(cache_dir.c_str(), &st) != 0) mkdir(cache_dir.c_str(), 0775);
+
+        set_default_env("MESA_SHADER_CACHE_DIR", cache_dir.c_str());
+    }
+
+    // Use RTLD_LOCAL so default-namespace dlsym("libvulkan.so") stays distinct
+    // and our ShadowHook proxies route system calls cleanly into this handle.
+    void *handle = adrenotools_open_libvulkan(
+        RTLD_LOCAL | RTLD_NOW,
         ADRENOTOOLS_DRIVER_CUSTOM,
-        tmpdir,
-        native_lib_dir,
-        fixed_dir,
-        "libvulkan_freedreno.so",
-        NULL,
-        NULL
+        tmp_dir.empty() ? nullptr : tmp_dir.c_str(),
+        hook_dir.c_str(),
+        driver_dir.c_str(),
+        driver_name,
+        nullptr,
+        nullptr
     );
 
-    if (!g_turnip_handle) { ALOGE("adrenotools_open_libvulkan failed"); goto cleanup; }
-
-    g_turnip_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_turnip_handle, "vkGetInstanceProcAddr");
-    if (!g_turnip_gipa) {
-        ALOGE("dlsym vkGetInstanceProcAddr failed");
-        dlclose(g_turnip_handle); g_turnip_handle = nullptr;
-        goto cleanup;
+    if (!handle) {
+        ALOGE("%s: adrenotools_open_libvulkan failed", label);
+        return;
     }
 
-    g_turnip_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_turnip_handle, "vkGetDeviceProcAddr");
-    if (!g_turnip_gdpa) {
-        ALOGE("dlsym vkGetDeviceProcAddr failed");
-        dlclose(g_turnip_handle); g_turnip_handle = nullptr;
-        goto cleanup;
+    if (!populate_active_dispatch(handle)) {
+        dlclose(handle);
+        return;
     }
 
-    ALOGI("Turnip loaded — installing hooks");
-    g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
+    slot_handle = handle;
 
+    ALOGI("%s loaded — installing Vulkan ShadowHooks", label);
+    if (!install_vulkan_hooks_locked()) {
+        ALOGE("%s: required ShadowHook installation failed", label);
+        return;
+    }
+
+    if (!is_panvk) {
 #ifdef OVERCLOCK
-    ALOGI("Overclock mode — turbo + priority boost");
-    adrenotools_set_turbo(true);
-    if (setpriority(PRIO_PROCESS, 0, -20) != 0) {
-        ALOGI("setpriority -20 denied, trying -10");
-        setpriority(PRIO_PROCESS, 0, -10);
-    }
+        ALOGI("Overclock mode — turbo + priority boost");
+        adrenotools_set_turbo(true);
+        if (setpriority(PRIO_PROCESS, 0, -20) != 0) {
+            ALOGI("setpriority -20 denied, trying -10");
+            setpriority(PRIO_PROCESS, 0, -10);
+        }
 #else
-    ALOGI("Standard mode");
-    adrenotools_set_turbo(false);
+        ALOGI("Standard mode");
+        adrenotools_set_turbo(false);
 #endif
+    }
 
-    ALOGI("Turnip hooks installed");
-
-cleanup:
-    env->ReleaseStringUTFChars(jPath, base_cache_path);
-    env->DeleteLocalRef(cacheFileObj);
-    env->DeleteLocalRef(jPath);
-    free(native_lib_dir);
+    ALOGI("%s hooks active", label);
 }
 
-// 🟢 PANVK DRIVER INITIALIZER (Over-cmd / Mesa PanVK)
-// Mirrors init_turnip_driver but loads libvulkan_panfrost.so for ARM Mali GPUs.
-static void init_panvk_driver(JNIEnv* env, jobject context) {
-    if (g_panvk_handle != nullptr) {
-        ALOGI("init_panvk_driver: re-hooking existing handle");
-
-        if (g_shadow_stub_gipa) { shadowhook_unhook(g_shadow_stub_gipa); g_shadow_stub_gipa = nullptr; }
-        if (g_shadow_stub_gdpa) { shadowhook_unhook(g_shadow_stub_gdpa); g_shadow_stub_gdpa = nullptr; }
-
-        g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
-        return;
-    }
-
-    char fixed_dir[512]  = {};
-    char tmpdir[512]     = {};
-    char cache_dir[512]  = {};
-
-    char* native_lib_dir = get_native_library_dir(env, context);
-    if (!native_lib_dir) {
-        ALOGE("init_panvk_driver: could not resolve native lib dir");
-        return;
-    }
-
-    snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
-    ALOGI("Native Lib Dir: %s", fixed_dir);
-    setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
-    setenv("MESA_VULKAN_ICD_SELECT", "panvk", 1);
-
-    prime_jni_cache(env);
-    jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
-    jstring jPath        = (jstring)env->CallObjectMethod(cacheFileObj, g_jni_cache.getAbsPath);
-
-    const char* base_cache_path = env->GetStringUTFChars(jPath, nullptr);
-
-    snprintf(tmpdir,    sizeof(tmpdir),    "%s/panvk_tmp/",          base_cache_path);
-    snprintf(cache_dir, sizeof(cache_dir), "%s/panvk_shader_cache/", base_cache_path);
-
-    struct stat st;
-    if (stat(tmpdir,    &st) != 0) mkdir(tmpdir,    0775);
-    if (stat(cache_dir, &st) != 0) mkdir(cache_dir, 0775);
-
-    setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
-
-    g_panvk_handle = adrenotools_open_libvulkan(
-        RTLD_GLOBAL | RTLD_NOW,
-        ADRENOTOOLS_DRIVER_CUSTOM,
-        tmpdir,
-        native_lib_dir,
-        fixed_dir,
-        "libvulkan_panfrost.so",
-        NULL,
-        NULL
-    );
-
-    if (!g_panvk_handle) { ALOGE("adrenotools_open_libvulkan failed for panvk"); goto cleanup; }
-
-    g_panvk_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_panvk_handle, "vkGetInstanceProcAddr");
-    if (!g_panvk_gipa) {
-        ALOGE("dlsym vkGetInstanceProcAddr failed for panvk");
-        dlclose(g_panvk_handle); g_panvk_handle = nullptr;
-        goto cleanup;
-    }
-
-    g_panvk_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_panvk_handle, "vkGetDeviceProcAddr");
-    if (!g_panvk_gdpa) {
-        ALOGE("dlsym vkGetDeviceProcAddr failed for panvk");
-        dlclose(g_panvk_handle); g_panvk_handle = nullptr;
-        goto cleanup;
-    }
-
-    ALOGI("PanVK loaded — installing hooks");
-    g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
-    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
-
-    ALOGI("PanVK hooks installed");
-
-cleanup:
-    env->ReleaseStringUTFChars(jPath, base_cache_path);
-    env->DeleteLocalRef(cacheFileObj);
-    env->DeleteLocalRef(jPath);
-    free(native_lib_dir);
+static void init_turnip_driver(JNIEnv *env, jobject context) {
+    init_custom_driver(env, context, DriverKind::Turnip);
 }
 
-// Detect Mali GPU (target for PanVK) by reading /sys/class/kgsl/kgsl-3d0/gpu_model
-static bool isMaliGpu() {
-    char gpuName[64] = {};
-    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
-    if (!gpuName[0]) read_first_line("/proc/device-tree/model", gpuName, sizeof(gpuName));
-    if (!gpuName[0]) read_first_line("/sys/firmware/devicetree/base/model", gpuName, sizeof(gpuName));
-    return (strstr(gpuName, "Mali") != nullptr || strstr(gpuName, "mali") != nullptr);
+static void init_panvk_driver(JNIEnv *env, jobject context) {
+    init_custom_driver(env, context, DriverKind::PanVK);
 }
+
+static void init_detected_driver(JNIEnv *env, jobject context) {
+    if (isMaliGpu()) {
+        ALOGI("Mali GPU detected — initializing PanVK driver");
+        init_panvk_driver(env, context);
+    } else {
+        init_turnip_driver(env, context);
+    }
+}
+
+// ─── Library constructor & JNI / native-dlopen bootstrap ─────────────────────
 
 static void schedule_native_jni_init();
 
 __attribute__((constructor))
 static void global_atomic_init() {
     // ─── Core Mesa/Vulkan env ───
-    // MESA_VULKAN_ICD_SELECT is set per-driver in init_turnip_driver / init_panvk_driver
-    // so PanVK on Mali isn't overridden by the Turnip default.
-    setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "1",        1);
-    setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS",   "1",        1);
-    setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
-    setenv("MESA_SHADER_CACHE_DISABLE",           "false",    1);
-    setenv("MESA_SHADER_CACHE_MAX_SIZE",          "4G",       1);
+    // MESA_VULKAN_ICD_SELECT is set per-driver in init_custom_driver() so PanVK
+    // on Mali isn't overridden by a Turnip default (or vice versa).
+    set_default_env("MESA_VK_IGNORE_CONFORMANCE_WARNING",          "1");
+    set_default_env("MESA_VK_IGNORE_CONFORMANCE_ERRORS",           "1");
+    set_default_env("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE",  "1");
+    set_default_env("MESA_SHADER_CACHE_DISABLE",                   "false");
+    set_default_env("MESA_SHADER_CACHE_MAX_SIZE",                  "4G");
     unsetenv("MESA_DISK_CACHE_SINGLE_FILE");
     unsetenv("MESA_DISK_CACHE_READ_ONLY");
 
     // ─── Perf / debug ───
-    setenv("GALLIUM_PRINT_OPTIONS", "0",      1);
-    setenv("MESA_DEBUG",            "silent", 1);
-    setenv("MESA_NO_ERROR",         "1",      1);
-    setenv("MESA_GLTHREAD",         "true",   1);
-    setenv("vblank_mode",           "0",      1);
-    setenv("TU_ROBUST_BUFFER_ACCESS", "0",   1);
-    setenv("TU_GMEM_ALLOW_OVERLAP",   "1",   1);
-    setenv("TU_RENDERPASS_CACHE",     "1",   1);
-
-    // ─── Anisotropy: 4x is a good balance for weak CPUs — 16x wastes fillrate ───
-    setenv("MESA_TEXTURE_MAX_ANISOTROPY", "4", 1);
+    set_default_env("GALLIUM_PRINT_OPTIONS",       "0");
+    set_default_env("MESA_DEBUG",                  "silent");
+    set_default_env("MESA_NO_ERROR",               "1");
+    set_default_env("MESA_GLTHREAD",               "true");
+    set_default_env("vblank_mode",                 "0");
+    set_default_env("MESA_TEXTURE_MAX_ANISOTROPY", "4");
 
     // ─── WSI present mode ───
 #ifdef OVERCLOCK
-    setenv("MESA_VK_WSI_PRESENT_MODE", "immediate", 1);
+    set_default_env("MESA_VK_WSI_PRESENT_MODE", "immediate");
 #else
-    setenv("MESA_VK_WSI_PRESENT_MODE", "mailbox",   1);
+    set_default_env("MESA_VK_WSI_PRESENT_MODE", "mailbox");
 #endif
 
     // ─── Unity ───
-    setenv("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK",  "1",      1);
-    setenv("UNITY_VULKAN_ENABLE_VALIDATION_LAYERS", "0",     1);
-    setenv("UNITY_GFX_DEVICE_API",                 "vulkan", 1);
+    set_default_env("UNITY_DISABLE_GRAPHICS_DRIVER_CHECK",  "1");
+    set_default_env("UNITY_VULKAN_ENABLE_VALIDATION_LAYERS", "0");
+    set_default_env("UNITY_GFX_DEVICE_API",                 "vulkan");
 
-    // ─── Heap size: cap at 40% of RAM on weak devices to avoid OOM kills ───
-    // 50% was causing ~5–6 GB on 12 GB devices; weak phones are 2–4 GB.
-    {
+    char sdk_str[PROP_VALUE_MAX] = {};
+    __system_property_get("ro.build.version.sdk", sdk_str);
+    int sdk = std::atoi(sdk_str);
+    ALOGI("Android SDK: %d", sdk);
+
+    unsetenv("MESA_VK_VERSION_OVERRIDE");
+    unsetenv("FD_DEV_FEATURES");
+
+    if (isMaliGpu()) {
+        applyPanvkOptimizations();
+    } else {
+        // ─── Turnip / Adreno-only settings ───
+        set_default_env("TU_ROBUST_BUFFER_ACCESS", "0");
+        set_default_env("TU_GMEM_ALLOW_OVERLAP",   "1");
+        set_default_env("TU_RENDERPASS_CACHE",     "1");
+
+        // Cap Vulkan heap override at 40% of physical RAM (floor 256 MB) to prevent OOM.
         long pages     = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf(_SC_PAGESIZE);
-        long long total_mb = ((long long)pages * page_size) / (1024 * 1024);
+        if (pages > 0 && page_size > 0) {
+            long long total_mb = (static_cast<long long>(pages) * page_size) / (1024LL * 1024LL);
+            long heap_mb = static_cast<long>((total_mb * 40LL) / 100LL);
+            if (heap_mb < 256) heap_mb = 256;
 
-        // On phones with 2 GB RAM, 50% = 1024 MB which starves the OS.
-        // 40% is safer; floor stays at 256 MB for very constrained devices.
-        long heap_mb = (long)(total_mb * 40 / 100);
-        if (heap_mb < 256) heap_mb = 256;
+            char heap_str[24];
+            std::snprintf(heap_str, sizeof(heap_str), "%ld", heap_mb);
+            set_default_env("TU_OVERRIDE_HEAP_SIZE", heap_str);
+            ALOGI("TU_OVERRIDE_HEAP_SIZE=%s MB (40%% of %lld MB RAM)", heap_str, total_mb);
+        }
 
-        char heap_str[16];
-        snprintf(heap_str, sizeof(heap_str), "%ld", heap_mb);
-        setenv("TU_OVERRIDE_HEAP_SIZE", heap_str, 1);
-        ALOGI("TU_OVERRIDE_HEAP_SIZE=%s MB (40%% of %lld MB RAM)", heap_str, total_mb);
-    }
-
-    // ─── SDK / One UI detection ───
-    {
-        char sdk_str[8] = {};
-        __system_property_get("ro.build.version.sdk", sdk_str);
-        int sdk = atoi(sdk_str);
-        ALOGI("Android SDK: %d", sdk);
-
-        unsetenv("MESA_VK_VERSION_OVERRIDE");
-        unsetenv("FD_DEV_FEATURES");
-
+        // Samsung One UI 6.0+ UBWC flag hint.
         char oneui_str[PROP_VALUE_MAX] = {};
         if (__system_property_get("ro.build.version.oneui", oneui_str) > 0) {
-            int raw = atoi(oneui_str);
+            int raw = std::atoi(oneui_str);
             if (raw >= 60000 && sdk >= 30) {
-                int major = raw / 10000, minor = (raw % 10000) / 100;
+                int major = raw / 10000;
+                int minor = (raw % 10000) / 100;
                 ALOGI("One UI %d.%d detected — enabling UBWC flag hint", major, minor);
-                setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
+                set_default_env("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1");
             }
         }
+
+        applyTurnipOptimizations();
     }
 
-    applyTurnipOptimizations();
-    applyPanvkOptimizations();
-
-    shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-    bytehook_init(BYTEHOOK_MODE_MANUAL,     false);
-
-    // If we were dlopen()'d from native code, ART never calls JNI_OnLoad.
-    // This starts a deferred fallback so init still happens in that case.
-    schedule_native_jni_init();
+    // Defer ShadowHook + JNI initialization until after dlopen() releases the
+    // linker lock. If loaded via native dlopen(), ART never invokes JNI_OnLoad,
+    // so this fallback picks up the running JavaVM automatically.
+    if (!env_is_truthy("ADRENOTOOLS_DISABLE")) {
+        schedule_native_jni_init();
+    } else {
+        ALOGI("ADRENOTOOLS_DISABLE set — skipping automatic Vulkan hook init");
+    }
 }
 
-void perform_init(JavaVM* vm) {
-    ALOGI("JNI_OnLoad: started");
+static jobject query_current_application(JNIEnv *env) {
+    if (!env) return nullptr;
 
-    JNIEnv* env = nullptr;
-    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+    jclass atCls = env->FindClass("android/app/ActivityThread");
+    if (check_and_clear_jni_exception(env) || !atCls) return nullptr;
+
+    jmethodID caMid = env->GetStaticMethodID(
+        atCls, "currentApplication", "()Landroid/app/Application;");
+    if (check_and_clear_jni_exception(env) || !caMid) {
+        env->DeleteLocalRef(atCls);
+        return nullptr;
+    }
+
+    jobject app = env->CallStaticObjectMethod(atCls, caMid);
+    env->DeleteLocalRef(atCls);
+    if (check_and_clear_jni_exception(env)) return nullptr;
+    return app;
+}
+
+static void perform_init(JavaVM *vm) {
+    if (env_is_truthy("ADRENOTOOLS_DISABLE")) {
+        ALOGI("perform_init: skipped (ADRENOTOOLS_DISABLE)");
+        return;
+    }
+
+    ALOGI("perform_init: started");
+
+    JNIEnv *env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
     }
 
-    // ─── Cache ActivityThread lookups as globals — only done once ───
-    static jclass activityThreadCls = (jclass)env->NewGlobalRef(
-        env->FindClass("android/app/ActivityThread"));
-    static jmethodID currentAppMid  = env->GetStaticMethodID(
-        activityThreadCls, "currentApplication", "()Landroid/app/Application;");
-
-    jobject app = env->CallStaticObjectMethod(activityThreadCls, currentAppMid);
-    if (app) {
-        ALOGI("JNI_OnLoad: app ready, initializing immediately");
-        if (isMaliGpu()) {
-            ALOGI("Mali GPU detected — initializing PanVK driver");
-            init_panvk_driver(env, app);
-        } else {
-            init_turnip_driver(env, app);
-        }
+    if (jobject app = query_current_application(env)) {
+        ALOGI("perform_init: Application context ready, initializing immediately");
+        init_detected_driver(env, app);
         env->DeleteLocalRef(app);
         return;
     }
 
-    // ─── Fallback poll thread — kept lightweight ───
-    // Captures only the VM pointer; no lambdas with heavy captures.
+    // Application not bound yet (e.g. attachBaseContext / early native load).
+    // Poll for up to 5 seconds (200 * 25 ms), then fall back to dladdr() path.
     std::thread([vm]() {
-        JNIEnv* t_env = nullptr;
-        vm->AttachCurrentThread(&t_env, nullptr);
+        JNIEnv *t_env = nullptr;
+        if (vm->AttachCurrentThread(&t_env, nullptr) != JNI_OK)
+            return;
 
-        jclass     atCls = t_env->FindClass("android/app/ActivityThread");
-        jmethodID  caMid = t_env->GetStaticMethodID(atCls, "currentApplication",
-                                                      "()Landroid/app/Application;");
-        jobject t_app    = nullptr;
-		
-        for (int i = 0; i < 20 && !t_app; ++i) {
-            t_app = t_env->CallStaticObjectMethod(atCls, caMid);
-            if (!t_app) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-		}
-
-        if (t_app) {
-            if (isMaliGpu()) {
-                ALOGI("Mali GPU detected — initializing PanVK driver");
-                init_panvk_driver(t_env, t_app);
-            } else {
-                init_turnip_driver(t_env, t_app);
-            }
+        jobject t_app = nullptr;
+        for (int i = 0; i < 200 && !t_app; ++i) {
+            t_app = query_current_application(t_env);
+            if (!t_app)
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
 
-        t_env->DeleteLocalRef(atCls);
-        if (t_app) t_env->DeleteLocalRef(t_app);
+        if (t_app) {
+            init_detected_driver(t_env, t_app);
+            t_env->DeleteLocalRef(t_app);
+        } else {
+            ALOGW("perform_init: Application context timed out — falling back to dladdr()");
+            init_detected_driver(t_env, nullptr);
+        }
+
         vm->DetachCurrentThread();
     }).detach();
 }
 
-// perform_init() must run exactly once, whether it is triggered by ART's
-// JNI_OnLoad (System.loadLibrary path) or by the native-dlopen fallback below.
+// Ensure automatic init executes at most once across JNI_OnLoad and native fallback.
 static std::once_flag g_init_once;
 
-static void run_init_once(JavaVM* vm) {
+static void run_init_once(JavaVM *vm) {
     std::call_once(g_init_once, [vm]() {
-        g_java_vm = vm;
         perform_init(vm);
     });
 }
 
-/**
- * @brief Public API: initialize the PanVK (ARM Mali) driver manually.
- * @param vm The JavaVM pointer (from JNI_OnLoad or JNI_GetCreatedJavaVMs).
- *
- * Call this from your app's native init if you want to force PanVK loading
- * on a Mali GPU. The library also attempts this automatically in perform_init
- * when a Mali GPU is detected.
- */
-extern "C" JNIEXPORT void JNICALL adrenotools_init_panvk_driver(JavaVM* vm) {
+extern "C" JNIEXPORT void JNICALL adrenotools_init_panvk_driver(JavaVM *vm) {
     if (!vm) return;
 
-    JNIEnv* env = nullptr;
+    JNIEnv *env = nullptr;
     bool attached = false;
-    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
         if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
         attached = true;
     }
 
-    jclass activityThreadCls = env->FindClass("android/app/ActivityThread");
-    jmethodID currentAppMid = env->GetStaticMethodID(
-        activityThreadCls, "currentApplication", "()Landroid/app/Application;");
-    jobject app = env->CallStaticObjectMethod(activityThreadCls, currentAppMid);
+    jobject app = query_current_application(env);
+    ALOGI("adrenotools_init_panvk_driver: loading PanVK driver for Mali GPU");
+    init_panvk_driver(env, app);
+    if (app) env->DeleteLocalRef(app);
 
-    if (app) {
-        ALOGI("adrenotools_init_panvk_driver: loading libvulkan_panfrost.so for Mali GPU");
-        init_panvk_driver(env, app);
-        env->DeleteLocalRef(app);
-    } else {
-        ALOGW("adrenotools_init_panvk_driver: could not get Application context");
-    }
-
-    env->DeleteLocalRef(activityThreadCls);
     if (attached) vm->DetachCurrentThread();
 }
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
     run_init_once(vm);
     return JNI_VERSION_1_6;
 }
 
 // ─── Native-dlopen fallback ──────────────────────────────────────────────────
-// ART only calls JNI_OnLoad for System.load/loadLibrary. When another native
-// library dlopen()s us, we look up the already-running JavaVM ourselves.
-static JavaVM* find_created_java_vm() {
-    using GetVMsFn = jint (*)(JavaVM**, jsize, jsize*);
+// ART only invokes JNI_OnLoad for System.load/loadLibrary. When loaded via
+// dlopen(), DT_NEEDED, or LD_PRELOAD, look up the existing JavaVM directly.
+static JavaVM *find_created_java_vm() {
+    using GetVMsFn = jint (*)(JavaVM **, jsize, jsize *);
 
     GetVMsFn fn = reinterpret_cast<GetVMsFn>(dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
     if (!fn) {
-        for (const char* lib : {"libnativehelper.so", "libart.so"}) {
-            void* h = dlopen(lib, RTLD_NOW | RTLD_NOLOAD);
+        for (const char *lib : {"libnativehelper.so", "libart.so"}) {
+            void *h = dlopen(lib, RTLD_NOW | RTLD_NOLOAD);
             if (!h) h = dlopen(lib, RTLD_NOW);
             if (!h) continue;
             fn = reinterpret_cast<GetVMsFn>(dlsym(h, "JNI_GetCreatedJavaVMs"));
@@ -906,31 +1379,29 @@ static JavaVM* find_created_java_vm() {
     }
     if (!fn) return nullptr;
 
-    JavaVM* vm = nullptr;
+    JavaVM *vm  = nullptr;
     jsize count = 0;
     if (fn(&vm, 1, &count) != JNI_OK || count < 1) return nullptr;
     return vm;
 }
 
-// Runs on a detached thread. It blocks on the dynamic loader lock until the
-// dlopen() that is running our constructor has finished, so perform_init()
-// never does its own dlopen()s re-entrantly from inside a constructor.
+// Runs on a detached thread so it naturally waits for the dynamic loader lock
+// held during our ELF constructor to be released before calling dlopen().
 static void schedule_native_jni_init() {
     std::thread([]() {
-        JavaVM* vm = nullptr;
-        // The VM exists already if we were loaded from native code; retry
-        // briefly in case we were loaded extremely early in process startup.
-        for (int i = 0; i < 100 && !(vm = find_created_java_vm()); ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        JavaVM *vm = nullptr;
+        for (int i = 0; i < 200 && !(vm = find_created_java_vm()); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
 
         if (!vm) {
-            ALOGE("native-load fallback: no JavaVM found, init skipped");
+            ALOGW("native-load fallback: no JavaVM found — initializing via dladdr() only");
+            init_detected_driver(nullptr, nullptr);
             return;
         }
 
-        JNIEnv* env = nullptr;
+        JNIEnv *env = nullptr;
         bool attached = false;
-        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+        if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
             if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
                 ALOGE("native-load fallback: AttachCurrentThread failed");
                 return;
@@ -939,7 +1410,7 @@ static void schedule_native_jni_init() {
         }
 
         ALOGI("native-load fallback: running init (JNI_OnLoad may not be called)");
-        run_init_once(vm);   // no-op if JNI_OnLoad already ran
+        run_init_once(vm);
 
         if (attached) vm->DetachCurrentThread();
     }).detach();
