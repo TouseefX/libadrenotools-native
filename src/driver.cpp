@@ -277,11 +277,13 @@ static JavaVM* g_java_vm = nullptr;
 __attribute__((always_inline))
 static inline PFN_vkVoidFunction hooked_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     return g_turnip_gipa(instance, pName);
+	SHADOWHOOK_POP_STACK();
 }
 
 __attribute__((always_inline))
 static inline PFN_vkVoidFunction hooked_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     return g_turnip_gdpa(device, pName);
+	SHADOWHOOK_POP_STACK();
 }
 
 struct CachedJNI {
