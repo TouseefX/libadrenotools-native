@@ -15,8 +15,9 @@ A library for applying rootless Adreno GPU driver modifications/replacements. Cu
 
 Tested on [Rustudio](https://github.com/TouseefX/rustudio)
 
-FPS went from 20 fps to 120 fps (refresh rate limit) On N20 and S20 Ultra 5G Snapdragon
+FPS went from 20 fps to 120 fps (refresh rate limit) On N20 and S20 Ultra 5G Snapdragon in the highest settings
 and this was a desktop renderer, and it beated the stock driver
+Testing Place: a Baseplate (yes I'm not kidding)
 
 hadn't been tested for Mail GPUs yet
 
