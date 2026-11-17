@@ -33,7 +33,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "AdrenoToolsPatch", __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN,  "AdrenoToolsPatch", __VA_ARGS__)
@@ -468,43 +467,31 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 
 // ─── Active custom Vulkan loader state & ShadowHook proxies ──────────────────
 //
-// Unified atomic dispatch table shared by both Turnip (Adreno) and PanVK (Mali).
+// Only vkGetInstanceProcAddr (gipa) and vkGetDeviceProcAddr (gdpa) are hooked:
+// hooking other Vulkan symbols directly conflicts with pre-existing system/UI
+// instances. Both Turnip (Adreno) and PanVK (Mali) share these two atomics.
+//
 // ShadowHook proxies MUST:
 //   1. Be __attribute__((noinline)) so __builtin_return_address(0) is always the
 //      return address pushed by ShadowHook's hub trampoline (even under -O3/LTO).
-//   2. Construct SHADOWHOOK_STACK_SCOPE() at the top of the function so the
-//      per-thread recursion-guard frame is popped on EVERY return path.
+//   2. Construct SHADOWHOOK_STACK_SCOPE() at the top so the per-thread
+//      recursion-guard frame is popped on EVERY return path.
 //   3. Fall back cleanly via SHADOWHOOK_CALL_PREV() if a pointer is null.
-//
-// ByteHook is intentionally NOT used: intercepting dlopen corrupts caller return
-// addresses that Bionic's linker relies on for namespace resolution.
 
-struct ActiveVulkanDispatch {
-    std::atomic<PFN_vkGetInstanceProcAddr>                getInstanceProcAddr{nullptr};
-    std::atomic<PFN_vkGetDeviceProcAddr>                  getDeviceProcAddr{nullptr};
-    std::atomic<PFN_vkCreateInstance>                     createInstance{nullptr};
-    std::atomic<PFN_vkDestroyInstance>                    destroyInstance{nullptr};
-    std::atomic<PFN_vkEnumerateInstanceVersion>           enumerateInstanceVersion{nullptr};
-    std::atomic<PFN_vkEnumerateInstanceExtensionProperties> enumerateInstanceExtensionProperties{nullptr};
-    std::atomic<PFN_vkEnumerateInstanceLayerProperties>   enumerateInstanceLayerProperties{nullptr};
-    std::atomic<PFN_vkCreateDevice>                       createDevice{nullptr};
-    std::atomic<PFN_vkDestroyDevice>                      destroyDevice{nullptr};
-    std::atomic<PFN_vkEnumerateDeviceExtensionProperties> enumerateDeviceExtensionProperties{nullptr};
-    std::atomic<PFN_vkEnumerateDeviceLayerProperties>     enumerateDeviceLayerProperties{nullptr};
-};
+static std::atomic<PFN_vkGetInstanceProcAddr> g_active_gipa{nullptr};
+static std::atomic<PFN_vkGetDeviceProcAddr>   g_active_gdpa{nullptr};
 
-static ActiveVulkanDispatch g_vk;
-
-static void *g_turnip_handle = nullptr;
-static void *g_panvk_handle  = nullptr;
+static void *g_turnip_handle    = nullptr;
+static void *g_panvk_handle     = nullptr;
+static void *g_shadow_stub_gipa = nullptr;
+static void *g_shadow_stub_gdpa = nullptr;
 static std::mutex g_driver_mutex;
-static std::vector<void *> g_shadow_stubs;
 
 __attribute__((noinline))
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL hooked_vkGetInstanceProcAddr(
     VkInstance instance, const char *pName) {
     SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.getInstanceProcAddr.load(std::memory_order_acquire);
+    auto fn = g_active_gipa.load(std::memory_order_acquire);
     if (fn) return fn(instance, pName);
     return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
 }
@@ -513,110 +500,9 @@ __attribute__((noinline))
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL hooked_vkGetDeviceProcAddr(
     VkDevice device, const char *pName) {
     SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.getDeviceProcAddr.load(std::memory_order_acquire);
+    auto fn = g_active_gdpa.load(std::memory_order_acquire);
     if (fn) return fn(device, pName);
     return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkCreateInstance(
-    const VkInstanceCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator,
-    VkInstance *pInstance) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.createInstance.load(std::memory_order_acquire);
-    if (fn) return fn(pCreateInfo, pAllocator, pInstance);
-    return SHADOWHOOK_CALL_PREV(hooked_vkCreateInstance, pCreateInfo, pAllocator, pInstance);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR void VKAPI_CALL hooked_vkDestroyInstance(
-    VkInstance instance, const VkAllocationCallbacks *pAllocator) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.destroyInstance.load(std::memory_order_acquire);
-    if (fn) {
-        fn(instance, pAllocator);
-        return;
-    }
-    SHADOWHOOK_CALL_PREV(hooked_vkDestroyInstance, instance, pAllocator);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateInstanceVersion(
-    uint32_t *pApiVersion) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.enumerateInstanceVersion.load(std::memory_order_acquire);
-    if (fn) return fn(pApiVersion);
-    return SHADOWHOOK_CALL_PREV(hooked_vkEnumerateInstanceVersion, pApiVersion);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateInstanceExtensionProperties(
-    const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.enumerateInstanceExtensionProperties.load(std::memory_order_acquire);
-    if (fn) return fn(pLayerName, pPropertyCount, pProperties);
-    return SHADOWHOOK_CALL_PREV(
-        hooked_vkEnumerateInstanceExtensionProperties, pLayerName, pPropertyCount, pProperties);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateInstanceLayerProperties(
-    uint32_t *pPropertyCount, VkLayerProperties *pProperties) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.enumerateInstanceLayerProperties.load(std::memory_order_acquire);
-    if (fn) return fn(pPropertyCount, pProperties);
-    return SHADOWHOOK_CALL_PREV(
-        hooked_vkEnumerateInstanceLayerProperties, pPropertyCount, pProperties);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkCreateDevice(
-    VkPhysicalDevice physicalDevice,
-    const VkDeviceCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator,
-    VkDevice *pDevice) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.createDevice.load(std::memory_order_acquire);
-    if (fn) return fn(physicalDevice, pCreateInfo, pAllocator, pDevice);
-    return SHADOWHOOK_CALL_PREV(
-        hooked_vkCreateDevice, physicalDevice, pCreateInfo, pAllocator, pDevice);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR void VKAPI_CALL hooked_vkDestroyDevice(
-    VkDevice device, const VkAllocationCallbacks *pAllocator) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.destroyDevice.load(std::memory_order_acquire);
-    if (fn) {
-        fn(device, pAllocator);
-        return;
-    }
-    SHADOWHOOK_CALL_PREV(hooked_vkDestroyDevice, device, pAllocator);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateDeviceExtensionProperties(
-    VkPhysicalDevice physicalDevice,
-    const char *pLayerName,
-    uint32_t *pPropertyCount,
-    VkExtensionProperties *pProperties) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.enumerateDeviceExtensionProperties.load(std::memory_order_acquire);
-    if (fn) return fn(physicalDevice, pLayerName, pPropertyCount, pProperties);
-    return SHADOWHOOK_CALL_PREV(
-        hooked_vkEnumerateDeviceExtensionProperties,
-        physicalDevice, pLayerName, pPropertyCount, pProperties);
-}
-
-__attribute__((noinline))
-static VKAPI_ATTR VkResult VKAPI_CALL hooked_vkEnumerateDeviceLayerProperties(
-    VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount, VkLayerProperties *pProperties) {
-    SHADOWHOOK_STACK_SCOPE();
-    auto fn = g_vk.enumerateDeviceLayerProperties.load(std::memory_order_acquire);
-    if (fn) return fn(physicalDevice, pPropertyCount, pProperties);
-    return SHADOWHOOK_CALL_PREV(
-        hooked_vkEnumerateDeviceLayerProperties, physicalDevice, pPropertyCount, pProperties);
 }
 
 static bool ensure_shadowhook_ready() {
@@ -626,16 +512,6 @@ static bool ensure_shadowhook_ready() {
         return false;
     }
     return true;
-}
-
-template <typename Fn>
-static Fn resolve_loader_sym(void *loader_handle,
-                             PFN_vkGetInstanceProcAddr gipa,
-                             const char *name) {
-    void *sym = dlsym(loader_handle, name);
-    if (!sym && gipa)
-        sym = reinterpret_cast<void *>(gipa(VK_NULL_HANDLE, name));
-    return reinterpret_cast<Fn>(sym);
 }
 
 static bool populate_active_dispatch(void *loader_handle) {
@@ -649,54 +525,59 @@ static bool populate_active_dispatch(void *loader_handle) {
         return false;
     }
 
-    g_vk.getInstanceProcAddr.store(gipa, std::memory_order_release);
-    g_vk.getDeviceProcAddr.store(gdpa, std::memory_order_release);
-    g_vk.createInstance.store(
-        resolve_loader_sym<PFN_vkCreateInstance>(loader_handle, gipa, "vkCreateInstance"),
-        std::memory_order_release);
-    g_vk.destroyInstance.store(
-        resolve_loader_sym<PFN_vkDestroyInstance>(loader_handle, gipa, "vkDestroyInstance"),
-        std::memory_order_release);
-    g_vk.enumerateInstanceVersion.store(
-        resolve_loader_sym<PFN_vkEnumerateInstanceVersion>(
-            loader_handle, gipa, "vkEnumerateInstanceVersion"),
-        std::memory_order_release);
-    g_vk.enumerateInstanceExtensionProperties.store(
-        resolve_loader_sym<PFN_vkEnumerateInstanceExtensionProperties>(
-            loader_handle, gipa, "vkEnumerateInstanceExtensionProperties"),
-        std::memory_order_release);
-    g_vk.enumerateInstanceLayerProperties.store(
-        resolve_loader_sym<PFN_vkEnumerateInstanceLayerProperties>(
-            loader_handle, gipa, "vkEnumerateInstanceLayerProperties"),
-        std::memory_order_release);
-    g_vk.createDevice.store(
-        resolve_loader_sym<PFN_vkCreateDevice>(loader_handle, nullptr, "vkCreateDevice"),
-        std::memory_order_release);
-    g_vk.destroyDevice.store(
-        resolve_loader_sym<PFN_vkDestroyDevice>(loader_handle, nullptr, "vkDestroyDevice"),
-        std::memory_order_release);
-    g_vk.enumerateDeviceExtensionProperties.store(
-        resolve_loader_sym<PFN_vkEnumerateDeviceExtensionProperties>(
-            loader_handle, nullptr, "vkEnumerateDeviceExtensionProperties"),
-        std::memory_order_release);
-    g_vk.enumerateDeviceLayerProperties.store(
-        resolve_loader_sym<PFN_vkEnumerateDeviceLayerProperties>(
-            loader_handle, nullptr, "vkEnumerateDeviceLayerProperties"),
-        std::memory_order_release);
-
+    g_active_gipa.store(gipa, std::memory_order_release);
+    g_active_gdpa.store(gdpa, std::memory_order_release);
     return true;
 }
 
 // Must be called with g_driver_mutex held.
 static void clear_vulkan_hooks_locked() {
-    for (void *stub : g_shadow_stubs) {
-        if (stub) shadowhook_unhook(stub);
+    if (g_shadow_stub_gipa) {
+        shadowhook_unhook(g_shadow_stub_gipa);
+        g_shadow_stub_gipa = nullptr;
     }
-    g_shadow_stubs.clear();
+    if (g_shadow_stub_gdpa) {
+        shadowhook_unhook(g_shadow_stub_gdpa);
+        g_shadow_stub_gdpa = nullptr;
+    }
 }
 
-// Hook system libvulkan.so symbols by exact address so ShadowHook never matches
-// private memfd/patched copies opened via adrenotools_open_libvulkan().
+static void *hook_one_vulkan_sym(void *sys_vk,
+                                 const char *name,
+                                 void *proxy,
+                                 void *custom_target) {
+    void *stub = nullptr;
+    if (sys_vk) {
+        void *sys_sym = dlsym(sys_vk, name);
+        if (!sys_sym) {
+            ALOGE("System libvulkan.so missing symbol %s", name);
+            return nullptr;
+        }
+        if (sys_sym == custom_target) {
+            ALOGW("Skipping hook on %s: system symbol aliases custom loader", name);
+            return nullptr;
+        }
+        stub = shadowhook_hook_sym_addr_2(
+            sys_sym, proxy, nullptr, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
+    } else {
+        stub = shadowhook_hook_sym_name_2(
+            "libvulkan.so", name, proxy, nullptr, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
+    }
+
+    if (!stub) {
+        int err = shadowhook_get_errno();
+        if (err == SHADOWHOOK_ERRNO_PENDING) {
+            ALOGI("ShadowHook pending for %s", name);
+        } else {
+            ALOGE("ShadowHook failed for %s (%d): %s",
+                  name, err, shadowhook_to_errmsg(err));
+        }
+    }
+    return stub;
+}
+
+// Hook only vkGetInstanceProcAddr & vkGetDeviceProcAddr on system libvulkan.so
+// by exact address so private memfd/patched handles are never touched.
 // Must be called with g_driver_mutex held.
 static bool install_vulkan_hooks_locked() {
     if (!ensure_shadowhook_ready())
@@ -704,112 +585,23 @@ static bool install_vulkan_hooks_locked() {
 
     clear_vulkan_hooks_locked();
 
-    // Open the default-namespace system libvulkan.so so its symbols are pinned
-    // and resolved directly (not our isolated RTLD_LOCAL custom loader).
     void *sys_vk = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     if (!sys_vk)
         sys_vk = dlopen(find_libvulkan_path(), RTLD_NOW | RTLD_LOCAL);
 
-    struct HookEntry {
-        const char *name;
-        void       *proxy;
-        void       *custom_target;
-        bool        required;
-    };
+    g_shadow_stub_gipa = hook_one_vulkan_sym(
+        sys_vk,
+        "vkGetInstanceProcAddr",
+        reinterpret_cast<void *>(hooked_vkGetInstanceProcAddr),
+        reinterpret_cast<void *>(g_active_gipa.load(std::memory_order_relaxed)));
 
-    const HookEntry entries[] = {
-        {"vkGetInstanceProcAddr",
-         reinterpret_cast<void *>(hooked_vkGetInstanceProcAddr),
-         reinterpret_cast<void *>(g_vk.getInstanceProcAddr.load(std::memory_order_relaxed)),
-         true},
-        {"vkGetDeviceProcAddr",
-         reinterpret_cast<void *>(hooked_vkGetDeviceProcAddr),
-         reinterpret_cast<void *>(g_vk.getDeviceProcAddr.load(std::memory_order_relaxed)),
-         true},
-        {"vkCreateInstance",
-         reinterpret_cast<void *>(hooked_vkCreateInstance),
-         reinterpret_cast<void *>(g_vk.createInstance.load(std::memory_order_relaxed)),
-         false},
-        {"vkDestroyInstance",
-         reinterpret_cast<void *>(hooked_vkDestroyInstance),
-         reinterpret_cast<void *>(g_vk.destroyInstance.load(std::memory_order_relaxed)),
-         false},
-        {"vkEnumerateInstanceVersion",
-         reinterpret_cast<void *>(hooked_vkEnumerateInstanceVersion),
-         reinterpret_cast<void *>(g_vk.enumerateInstanceVersion.load(std::memory_order_relaxed)),
-         false},
-        {"vkEnumerateInstanceExtensionProperties",
-         reinterpret_cast<void *>(hooked_vkEnumerateInstanceExtensionProperties),
-         reinterpret_cast<void *>(
-             g_vk.enumerateInstanceExtensionProperties.load(std::memory_order_relaxed)),
-         false},
-        {"vkEnumerateInstanceLayerProperties",
-         reinterpret_cast<void *>(hooked_vkEnumerateInstanceLayerProperties),
-         reinterpret_cast<void *>(
-             g_vk.enumerateInstanceLayerProperties.load(std::memory_order_relaxed)),
-         false},
-        {"vkCreateDevice",
-         reinterpret_cast<void *>(hooked_vkCreateDevice),
-         reinterpret_cast<void *>(g_vk.createDevice.load(std::memory_order_relaxed)),
-         false},
-        {"vkDestroyDevice",
-         reinterpret_cast<void *>(hooked_vkDestroyDevice),
-         reinterpret_cast<void *>(g_vk.destroyDevice.load(std::memory_order_relaxed)),
-         false},
-        {"vkEnumerateDeviceExtensionProperties",
-         reinterpret_cast<void *>(hooked_vkEnumerateDeviceExtensionProperties),
-         reinterpret_cast<void *>(
-             g_vk.enumerateDeviceExtensionProperties.load(std::memory_order_relaxed)),
-         false},
-        {"vkEnumerateDeviceLayerProperties",
-         reinterpret_cast<void *>(hooked_vkEnumerateDeviceLayerProperties),
-         reinterpret_cast<void *>(
-             g_vk.enumerateDeviceLayerProperties.load(std::memory_order_relaxed)),
-         false},
-    };
+    g_shadow_stub_gdpa = hook_one_vulkan_sym(
+        sys_vk,
+        "vkGetDeviceProcAddr",
+        reinterpret_cast<void *>(hooked_vkGetDeviceProcAddr),
+        reinterpret_cast<void *>(g_active_gdpa.load(std::memory_order_relaxed)));
 
-    bool ok = true;
-    for (const auto &e : entries) {
-        if (!e.custom_target)
-            continue;
-
-        void *stub = nullptr;
-        if (sys_vk) {
-            void *sys_sym = dlsym(sys_vk, e.name);
-            if (!sys_sym) {
-                if (e.required) {
-                    ALOGE("System libvulkan.so missing required symbol %s", e.name);
-                    ok = false;
-                }
-                continue;
-            }
-            if (sys_sym == e.custom_target) {
-                ALOGW("Skipping hook on %s: system symbol aliases custom loader", e.name);
-                continue;
-            }
-            stub = shadowhook_hook_sym_addr_2(
-                sys_sym, e.proxy, nullptr, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
-        } else {
-            stub = shadowhook_hook_sym_name_2(
-                "libvulkan.so", e.name, e.proxy, nullptr, SHADOWHOOK_HOOK_WITH_SHARED_MODE);
-        }
-
-        if (stub) {
-            g_shadow_stubs.push_back(stub);
-        } else {
-            int err = shadowhook_get_errno();
-            if (err == SHADOWHOOK_ERRNO_PENDING) {
-                ALOGI("ShadowHook pending for %s", e.name);
-            } else {
-                ALOGW("ShadowHook failed for %s (%d): %s",
-                      e.name, err, shadowhook_to_errmsg(err));
-                if (e.required) ok = false;
-            }
-        }
-    }
-
-    ALOGI("Installed %zu ShadowHook Vulkan hooks", g_shadow_stubs.size());
-    return ok;
+    return g_shadow_stub_gipa != nullptr && g_shadow_stub_gdpa != nullptr;
 }
 
 // ─── JNI & path resolution helpers ───────────────────────────────────────────
