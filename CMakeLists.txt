@@ -60,8 +60,10 @@ FetchContent_MakeAvailable(bytehook)
 
 set(LIB_SOURCES src/bcenabler.cpp
                 src/driver.cpp
+                src/mailbox.cpp
                 include/adrenotools/bcenabler.h
                 include/adrenotools/driver.h
+                include/adrenotools/mailbox.h
                 include/adrenotools/priv.h)
 
 add_library(adrenotools ${LIB_SOURCES})

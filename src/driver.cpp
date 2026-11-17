@@ -47,6 +47,63 @@
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
 #define MAX_FILENAME_SCAN 512
 
+// 🟢 PANVK / MALI G52 SUPPORT (Over-cmd)
+extern char **environ; // Acceso directo a la tabla global de entornos de Linux/Android
+
+__attribute__((constructor)) void adrenotools_mali_bridge_init() {
+    // 1. Inyección estándar en el espacio de usuario de C++
+    setenv("PAN_MESA_DEBUG", "kbase", 1);
+    setenv("PAN_EXPERIMENTAL_KBASE_GL", "1", 1);
+    setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1); // ¡Faltaba esta línea crucial!
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "panfrost", 1);
+    setenv("GALLIUM_DRIVER", "panfrost", 1);
+
+    // 2. Inyección agresiva directo en la RAM global del proceso
+    // Esto asegura que cualquier biblioteca nativa de Android (como el cargador Vulkan)
+    // lea las variables de Panfrost/PanVK sí o sí, sin importar el hilo en el que corra.
+    if (environ) {
+        putenv((char*)"PAN_MESA_DEBUG=kbase");
+        putenv((char*)"PAN_EXPERIMENTAL_KBASE_GL=1");
+        putenv((char*)"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1");
+        putenv((char*)"MESA_LOADER_DRIVER_OVERRIDE=panfrost");
+        putenv((char*)"GALLIUM_DRIVER=panfrost");
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, "adrenotools", "Bypass de Kbase para Mali G52 Inyectado con Éxito");
+}
+
+// Xiaomi's Hyper OS (and several OEM builds) do not ship libvulkan.so under
+// /system/lib64. Probe the usual vendor locations and fall back to the stock path.
+static const char *find_libvulkan_path(void) {
+    static const char *candidates[] = {
+        "/system/lib64/libvulkan.so",
+        "/system/vendor/lib64/libvulkan.so",
+        "/vendor/lib64/libvulkan.so",
+        "/odm/lib64/libvulkan.so",
+        "/product/lib64/libvulkan.so",
+        nullptr,
+    };
+
+    struct stat st{};
+    for (const char **path = candidates; *path != nullptr; ++path) {
+        if (stat(*path, &st) == 0)
+            return *path;
+    }
+    return candidates[0];
+}
+
+// Log the detected ROM so Hyper OS (Xiaomi) devices are identifiable.
+static void log_detected_rom(void) {
+    char rom[PROP_VALUE_MAX] = {};
+    char brand[PROP_VALUE_MAX] = {};
+    __system_property_get("ro.miui.ui.version.name", rom);
+    __system_property_get("ro.product.brand", brand);
+    if (std::strcmp(rom, "Hyper OS") == 0)
+        ALOGI("Hyper OS (Xiaomi) detected - using vendor vulkan path fallback");
+    else if (brand[0])
+        ALOGI("Device brand: %s", brand);
+}
+
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
@@ -133,7 +190,9 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
         return nullptr;
     }
 
-    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
+    log_detected_rom();
+
+    return linkernsbypass_namespace_dlopen_unique(find_libvulkan_path(), tmpLibDir, dlopenFlags, hookNs);
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
@@ -272,6 +331,12 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 static void *g_turnip_handle = NULL;
 static PFN_vkGetInstanceProcAddr g_turnip_gipa = NULL;
 static PFN_vkGetDeviceProcAddr g_turnip_gdpa = nullptr;
+
+// 🟢 PANVK / MALI G52 DRIVER HANDLE (Over-cmd / Mesa PanVK)
+static void *g_panvk_handle = NULL;
+static PFN_vkGetInstanceProcAddr g_panvk_gipa = NULL;
+static PFN_vkGetDeviceProcAddr g_panvk_gdpa = nullptr;
+
 static JavaVM* g_java_vm = nullptr;
 
 __attribute__((always_inline))
@@ -401,6 +466,39 @@ void applyTurnipOptimizations() {
     }
 }
 
+// 🟢 PANVK / MALI G52 OPTIMIZATIONS (Over-cmd / Mesa PanVK)
+// Detects Mali GPU and applies PanVK-specific environment tweaks.
+static void applyPanvkOptimizations() {
+    char gpuName[64] = {};
+
+    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
+    if (!gpuName[0]) read_first_line("/proc/device-tree/model", gpuName, sizeof(gpuName));
+    if (!gpuName[0]) read_first_line("/sys/firmware/devicetree/base/model", gpuName, sizeof(gpuName));
+
+    // PanVK targets ARM Mali. Check for Mali in the GPU name.
+    bool isMali = (strstr(gpuName, "Mali") != nullptr || strstr(gpuName, "mali") != nullptr);
+
+    if (!gpuName[0]) {
+        // Unknown GPU — set conservative PanVK defaults anyway
+        setenv("PAN_MESA_DEBUG", "kbase", 1);
+        setenv("PAN_VK_DEBUG", "sync", 1);
+        ALOGI("PanVK: unknown GPU, using conservative defaults");
+        return;
+    }
+
+    if (isMali) {
+        ALOGI("PanVK: Mali GPU detected (%s)", gpuName);
+        setenv("PAN_MESA_DEBUG", "kbase", 1);
+        setenv("PAN_EXPERIMENTAL_KBASE_GL", "1", 1);
+        setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "panfrost", 1);
+        setenv("GALLIUM_DRIVER", "panfrost", 1);
+        setenv("PAN_VK_DEBUG", "sync", 1);
+    } else {
+        ALOGI("PanVK: non-Mali GPU detected (%s) — PanVK may not work", gpuName);
+    }
+}
+
 static void* g_shadow_stub_gipa = nullptr;
 static void* g_shadow_stub_gdpa = nullptr;
 
@@ -428,7 +526,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
     ALOGI("Native Lib Dir: %s", fixed_dir);
-    setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+    setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
 	
     prime_jni_cache(env);
     jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
@@ -497,12 +596,106 @@ cleanup:
     free(native_lib_dir);
 }
 
+// 🟢 PANVK DRIVER INITIALIZER (Over-cmd / Mesa PanVK)
+// Mirrors init_turnip_driver but loads libvulkan_panfrost.so for ARM Mali GPUs.
+static void init_panvk_driver(JNIEnv* env, jobject context) {
+    if (g_panvk_handle != nullptr) {
+        ALOGI("init_panvk_driver: re-hooking existing handle");
+
+        if (g_shadow_stub_gipa) { shadowhook_unhook(g_shadow_stub_gipa); g_shadow_stub_gipa = nullptr; }
+        if (g_shadow_stub_gdpa) { shadowhook_unhook(g_shadow_stub_gdpa); g_shadow_stub_gdpa = nullptr; }
+
+        g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+        g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
+        return;
+    }
+
+    char fixed_dir[512]  = {};
+    char tmpdir[512]     = {};
+    char cache_dir[512]  = {};
+
+    char* native_lib_dir = get_native_library_dir(env, context);
+    if (!native_lib_dir) {
+        ALOGE("init_panvk_driver: could not resolve native lib dir");
+        return;
+    }
+
+    snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
+    ALOGI("Native Lib Dir: %s", fixed_dir);
+    setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+    setenv("MESA_VULKAN_ICD_SELECT", "panvk", 1);
+
+    prime_jni_cache(env);
+    jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
+    jstring jPath        = (jstring)env->CallObjectMethod(cacheFileObj, g_jni_cache.getAbsPath);
+
+    const char* base_cache_path = env->GetStringUTFChars(jPath, nullptr);
+
+    snprintf(tmpdir,    sizeof(tmpdir),    "%s/panvk_tmp/",          base_cache_path);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/panvk_shader_cache/", base_cache_path);
+
+    struct stat st;
+    if (stat(tmpdir,    &st) != 0) mkdir(tmpdir,    0775);
+    if (stat(cache_dir, &st) != 0) mkdir(cache_dir, 0775);
+
+    setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
+
+    g_panvk_handle = adrenotools_open_libvulkan(
+        RTLD_GLOBAL | RTLD_NOW,
+        ADRENOTOOLS_DRIVER_CUSTOM,
+        tmpdir,
+        native_lib_dir,
+        fixed_dir,
+        "libvulkan_panfrost.so",
+        NULL,
+        NULL
+    );
+
+    if (!g_panvk_handle) { ALOGE("adrenotools_open_libvulkan failed for panvk"); goto cleanup; }
+
+    g_panvk_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_panvk_handle, "vkGetInstanceProcAddr");
+    if (!g_panvk_gipa) {
+        ALOGE("dlsym vkGetInstanceProcAddr failed for panvk");
+        dlclose(g_panvk_handle); g_panvk_handle = nullptr;
+        goto cleanup;
+    }
+
+    g_panvk_gdpa = (PFN_vkGetDeviceProcAddr)dlsym(g_panvk_handle, "vkGetDeviceProcAddr");
+    if (!g_panvk_gdpa) {
+        ALOGE("dlsym vkGetDeviceProcAddr failed for panvk");
+        dlclose(g_panvk_handle); g_panvk_handle = nullptr;
+        goto cleanup;
+    }
+
+    ALOGI("PanVK loaded — installing hooks");
+    g_shadow_stub_gipa = shadowhook_hook_sym_name("libvulkan.so", "vkGetInstanceProcAddr", (void*)hooked_vkGetInstanceProcAddr, NULL);
+    g_shadow_stub_gdpa = shadowhook_hook_sym_name("libvulkan.so", "vkGetDeviceProcAddr",   (void*)hooked_vkGetDeviceProcAddr,   NULL);
+
+    ALOGI("PanVK hooks installed");
+
+cleanup:
+    env->ReleaseStringUTFChars(jPath, base_cache_path);
+    env->DeleteLocalRef(cacheFileObj);
+    env->DeleteLocalRef(jPath);
+    free(native_lib_dir);
+}
+
+// Detect Mali GPU (target for PanVK) by reading /sys/class/kgsl/kgsl-3d0/gpu_model
+static bool isMaliGpu() {
+    char gpuName[64] = {};
+    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
+    if (!gpuName[0]) read_first_line("/proc/device-tree/model", gpuName, sizeof(gpuName));
+    if (!gpuName[0]) read_first_line("/sys/firmware/devicetree/base/model", gpuName, sizeof(gpuName));
+    return (strstr(gpuName, "Mali") != nullptr || strstr(gpuName, "mali") != nullptr);
+}
+
 static void schedule_native_jni_init();
 
 __attribute__((constructor))
 static void global_atomic_init() {
     // ─── Core Mesa/Vulkan env ───
-    setenv("MESA_VULKAN_ICD_SELECT",              "turnip",   1);
+    // MESA_VULKAN_ICD_SELECT is set per-driver in init_turnip_driver / init_panvk_driver
+    // so PanVK on Mali isn't overridden by the Turnip default.
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "1",        1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS",   "1",        1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
@@ -576,6 +769,7 @@ static void global_atomic_init() {
     }
 
     applyTurnipOptimizations();
+    applyPanvkOptimizations();
 
     shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
     bytehook_init(BYTEHOOK_MODE_MANUAL,     false);
@@ -602,7 +796,12 @@ void perform_init(JavaVM* vm) {
     jobject app = env->CallStaticObjectMethod(activityThreadCls, currentAppMid);
     if (app) {
         ALOGI("JNI_OnLoad: app ready, initializing immediately");
-        init_turnip_driver(env, app);
+        if (isMaliGpu()) {
+            ALOGI("Mali GPU detected — initializing PanVK driver");
+            init_panvk_driver(env, app);
+        } else {
+            init_turnip_driver(env, app);
+        }
         env->DeleteLocalRef(app);
         return;
     }
@@ -623,7 +822,14 @@ void perform_init(JavaVM* vm) {
             if (!t_app) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		}
 
-        if (t_app) init_turnip_driver(t_env, t_app);
+        if (t_app) {
+            if (isMaliGpu()) {
+                ALOGI("Mali GPU detected — initializing PanVK driver");
+                init_panvk_driver(t_env, t_app);
+            } else {
+                init_turnip_driver(t_env, t_app);
+            }
+        }
 
         t_env->DeleteLocalRef(atCls);
         if (t_app) t_env->DeleteLocalRef(t_app);
@@ -640,6 +846,41 @@ static void run_init_once(JavaVM* vm) {
         g_java_vm = vm;
         perform_init(vm);
     });
+}
+
+/**
+ * @brief Public API: initialize the PanVK (ARM Mali) driver manually.
+ * @param vm The JavaVM pointer (from JNI_OnLoad or JNI_GetCreatedJavaVMs).
+ *
+ * Call this from your app's native init if you want to force PanVK loading
+ * on a Mali GPU. The library also attempts this automatically in perform_init
+ * when a Mali GPU is detected.
+ */
+extern "C" JNIEXPORT void JNICALL adrenotools_init_panvk_driver(JavaVM* vm) {
+    if (!vm) return;
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+
+    jclass activityThreadCls = env->FindClass("android/app/ActivityThread");
+    jmethodID currentAppMid = env->GetStaticMethodID(
+        activityThreadCls, "currentApplication", "()Landroid/app/Application;");
+    jobject app = env->CallStaticObjectMethod(activityThreadCls, currentAppMid);
+
+    if (app) {
+        ALOGI("adrenotools_init_panvk_driver: loading libvulkan_panfrost.so for Mali GPU");
+        init_panvk_driver(env, app);
+        env->DeleteLocalRef(app);
+    } else {
+        ALOGW("adrenotools_init_panvk_driver: could not get Application context");
+    }
+
+    env->DeleteLocalRef(activityThreadCls);
+    if (attached) vm->DetachCurrentThread();
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
