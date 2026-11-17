@@ -14,8 +14,11 @@
 #include <shadowhook.h>
 
 #include <dlfcn.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <link.h>
+#include <pthread.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -476,10 +479,17 @@ bool adrenotools_set_freedreno_env(const char *varName, const char *value) {
 //      return address pushed by ShadowHook's hub trampoline (even under -O3/LTO).
 //   2. Construct SHADOWHOOK_STACK_SCOPE() at the top so the per-thread
 //      recursion-guard frame is popped on EVERY return path.
-//   3. Fall back cleanly via SHADOWHOOK_CALL_PREV() if a pointer is null.
+//   3. Inspect SHADOWHOOK_RETURN_ADDRESS() and pass Android system UI / WebView /
+//      framework callers (libhwui.so SkiaVK, Trichrome/WebView, libgui.so, etc.)
+//      through to stock libvulkan.so via SHADOWHOOK_CALL_PREV() so Android's
+//      SkSurface::MakeFromAHardwareBuffer window surfaces never fail on Turnip/PanVK,
+//      while routing all app/game engine callers to the custom driver.
 
 static std::atomic<PFN_vkGetInstanceProcAddr> g_active_gipa{nullptr};
 static std::atomic<PFN_vkGetDeviceProcAddr>   g_active_gdpa{nullptr};
+static std::atomic<bool>                      g_hook_system_callers{false};
+static std::atomic<uint32_t>                  g_caller_cache_epoch{1};
+static std::atomic<uintptr_t>                 g_logged_caller_keys[16]{};
 
 static void *g_turnip_handle    = nullptr;
 static void *g_panvk_handle     = nullptr;
@@ -487,12 +497,224 @@ static void *g_shadow_stub_gipa = nullptr;
 static void *g_shadow_stub_gdpa = nullptr;
 static std::mutex g_driver_mutex;
 
+// Lock-free deduplicator so each calling module is logged at most once.
+static bool mark_caller_logged_once(uintptr_t key) {
+    if (key == 0) return false;
+    for (auto &slot : g_logged_caller_keys) {
+        uintptr_t cur = slot.load(std::memory_order_relaxed);
+        if (cur == key) return false;
+        if (cur == 0) {
+            uintptr_t expected = 0;
+            if (slot.compare_exchange_strong(expected, key, std::memory_order_relaxed))
+                return true;
+            if (expected == key) return false;
+        }
+    }
+    return false;
+}
+
+static void reset_logged_callers_locked() {
+    for (auto &slot : g_logged_caller_keys)
+        slot.store(0, std::memory_order_relaxed);
+    g_caller_cache_epoch.fetch_add(1, std::memory_order_release);
+}
+
+// Returns true when `path` belongs to Android OS, vendor, APEX, WebView, Play Services,
+// or OEM game-overlay libraries that must keep using stock libvulkan.so (notably
+// /system/lib64/libhwui.so's SkiaVK renderer, which imports vendor UBWC AHardwareBuffers
+// via SkSurface::MakeFromAHardwareBuffer).
+static bool is_system_or_ui_library(const char *path) {
+    if (!path || !path[0])
+        return false;
+
+    // Never bypass our own private memfd loader.
+    if (std::strncmp(path, "/memfd:", 7) == 0)
+        return false;
+
+    static constexpr const char *kSystemPrefixes[] = {
+        "/system/",
+        "/system_ext/",
+        "/vendor/",
+        "/odm/",
+        "/oem/",
+        "/product/",
+        "/apex/",
+    };
+    for (const char *prefix : kSystemPrefixes) {
+        if (std::strncmp(path, prefix, std::strlen(prefix)) == 0)
+            return true;
+    }
+
+    // Bare soname fallback if an OEM linker ever omits the leading slash.
+    if (path[0] != '/') {
+        static constexpr const char *kSystemSonames[] = {
+            "libhwui.so",
+            "libgui.so",
+            "libui.so",
+            "librenderengine.so",
+            "libvulkan.so",
+            "libandroid.so",
+            "libandroid_runtime.so",
+            "libmediandk.so",
+        };
+        for (const char *soname : kSystemSonames) {
+            if (std::strcmp(path, soname) == 0)
+                return true;
+        }
+    }
+
+    // Play-Store-updated WebView / Trichrome / Chrome, GMS Dynamite modules, and
+    // Samsung GOS overlays reside under /data/ rather than /system/ and also rely
+    // on stock SkiaVK + AHardwareBuffer import.
+    if (str_contains_ci(path, "libwebviewchromium") ||
+        str_contains_ci(path, "libmonochrome") ||
+        str_contains_ci(path, "trichromelibrary") ||
+        str_contains_ci(path, "android.webview") ||
+        str_contains_ci(path, "com.android.chrome") ||
+        str_contains_ci(path, "com.sec.android.app.sbrowser") ||
+        str_contains_ci(path, "com.google.android.gms") ||
+        str_contains_ci(path, "com.samsung.android.game.") ||
+        str_contains_ci(path, ".gpudrivers.")) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool is_system_ui_thread() {
+    char tname[16] = {};
+    if (pthread_getname_np(pthread_self(), tname, sizeof(tname)) != 0)
+        return false;
+    return std::strncmp(tname, "RenderThread",    12) == 0 ||
+           std::strncmp(tname, "hwuiTask",         8) == 0 ||
+           std::strncmp(tname, "Chrome_InProcGp", 15) == 0 ||
+           std::strncmp(tname, "VizCompositor",   13) == 0;
+}
+
+struct CallerPhdrQuery {
+    uintptr_t   pc;
+    uintptr_t   seg_start;
+    uintptr_t   seg_end;
+    const char *name;
+    bool        found;
+};
+
+static int find_caller_segment_cb(struct dl_phdr_info *info, size_t /*size*/, void *data) {
+    if (!info || !info->dlpi_phdr) return 0;
+    auto *q = static_cast<CallerPhdrQuery *>(data);
+    const uintptr_t bias = static_cast<uintptr_t>(info->dlpi_addr);
+
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
+        const ElfW(Phdr) &ph = info->dlpi_phdr[i];
+        if (ph.p_type != PT_LOAD || (ph.p_flags & PF_X) == 0 || ph.p_memsz == 0)
+            continue;
+        const uintptr_t start = bias + static_cast<uintptr_t>(ph.p_vaddr);
+        const uintptr_t end   = start + static_cast<uintptr_t>(ph.p_memsz);
+        if (end > start && q->pc >= start && q->pc < end) {
+            q->seg_start = start;
+            q->seg_end   = end;
+            q->name      = info->dlpi_name;
+            q->found     = true;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Trivially-constructible/destructible per-thread 4-slot segment cache so repeated
+// vkGetInstanceProcAddr / vkGetDeviceProcAddr calls resolve in a couple of instructions
+// without touching dl_iterate_phdr or taking any lock.
+struct CallerCacheSlot {
+    uintptr_t start;
+    uintptr_t end;
+    bool      bypass;
+};
+
+struct CallerThreadCache {
+    CallerCacheSlot slots[4];
+    uint32_t        next;
+    uint32_t        epoch;
+};
+
+static thread_local CallerThreadCache g_tls_caller_cache{};
+
+static bool should_bypass_custom_driver(const void *raw_ret_addr) {
+    if (g_hook_system_callers.load(std::memory_order_relaxed))
+        return false;
+    if (!raw_ret_addr)
+        return is_system_ui_thread();
+
+    const void *clean_addr = __builtin_extract_return_addr(const_cast<void *>(raw_ret_addr));
+    const uintptr_t pc     = reinterpret_cast<uintptr_t>(clean_addr);
+
+    CallerThreadCache &cache = g_tls_caller_cache;
+    const uint32_t cur_epoch = g_caller_cache_epoch.load(std::memory_order_acquire);
+    if (cache.epoch != cur_epoch) {
+        std::memset(&cache, 0, sizeof(cache));
+        cache.epoch = cur_epoch;
+    }
+
+    for (const auto &slot : cache.slots) {
+        if (pc >= slot.start && pc < slot.end)
+            return slot.bypass;
+    }
+
+    uintptr_t   seg_start = pc & ~static_cast<uintptr_t>(0xfffu);
+    uintptr_t   seg_end   = seg_start + 0x1000u;
+    uintptr_t   log_key   = 0;
+    const char *mod_name  = nullptr;
+
+    CallerPhdrQuery q{pc, 0, 0, nullptr, false};
+    dl_iterate_phdr(find_caller_segment_cb, &q);
+    if (q.found) {
+        seg_start = q.seg_start;
+        seg_end   = q.seg_end;
+        log_key   = q.seg_start;
+        if (q.name && q.name[0])
+            mod_name = q.name;
+    }
+
+    // Fall back to dladdr() if dlpi_name was empty or the segment wasn't in phdr.
+    if (!mod_name) {
+        Dl_info dli{};
+        if (dladdr(clean_addr, &dli) != 0 && dli.dli_fname && dli.dli_fname[0]) {
+            mod_name = dli.dli_fname;
+            if (log_key == 0)
+                log_key = reinterpret_cast<uintptr_t>(dli.dli_fbase);
+        }
+    }
+
+    bool bypass = false;
+    if (mod_name) {
+        bypass = is_system_or_ui_library(mod_name);
+        if (mark_caller_logged_once(log_key)) {
+            ALOGI("%s custom driver for caller: %s",
+                  bypass ? "Bypassing" : "Routing to", mod_name);
+        }
+    } else {
+        // Anonymous / JIT code frame — only bypass if executing on an Android UI thread.
+        bypass = is_system_ui_thread();
+    }
+
+    if (seg_end > seg_start) {
+        CallerCacheSlot &dst = cache.slots[cache.next & 3u];
+        dst.start            = seg_start;
+        dst.end              = seg_end;
+        dst.bypass           = bypass;
+        cache.next           = (cache.next + 1u) & 3u;
+    }
+
+    return bypass;
+}
+
 __attribute__((noinline))
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL hooked_vkGetInstanceProcAddr(
     VkInstance instance, const char *pName) {
     SHADOWHOOK_STACK_SCOPE();
+    const void *caller = SHADOWHOOK_RETURN_ADDRESS();
     auto fn = g_active_gipa.load(std::memory_order_acquire);
-    if (fn) return fn(instance, pName);
+    if (fn && !should_bypass_custom_driver(caller))
+        return fn(instance, pName);
     return SHADOWHOOK_CALL_PREV(hooked_vkGetInstanceProcAddr, instance, pName);
 }
 
@@ -500,8 +722,10 @@ __attribute__((noinline))
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL hooked_vkGetDeviceProcAddr(
     VkDevice device, const char *pName) {
     SHADOWHOOK_STACK_SCOPE();
+    const void *caller = SHADOWHOOK_RETURN_ADDRESS();
     auto fn = g_active_gdpa.load(std::memory_order_acquire);
-    if (fn) return fn(device, pName);
+    if (fn && !should_bypass_custom_driver(caller))
+        return fn(device, pName);
     return SHADOWHOOK_CALL_PREV(hooked_vkGetDeviceProcAddr, device, pName);
 }
 
@@ -582,6 +806,11 @@ static void *hook_one_vulkan_sym(void *sys_vk,
 static bool install_vulkan_hooks_locked() {
     if (!ensure_shadowhook_ready())
         return false;
+
+    const bool hook_sys = env_is_truthy("ADRENOTOOLS_HOOK_SYSTEM") ||
+                          env_is_truthy("ADRENOTOOLS_HOOK_HWUI");
+    g_hook_system_callers.store(hook_sys, std::memory_order_relaxed);
+    reset_logged_callers_locked();
 
     clear_vulkan_hooks_locked();
 
@@ -761,7 +990,7 @@ static int parse_adreno_generation(const char *str) {
     return 0;
 }
 
-static void applyTurnipOptimizations() {
+static int applyTurnipOptimizations() {
     char gpuName[64] = {};
     read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
 
@@ -774,34 +1003,44 @@ static void applyTurnipOptimizations() {
             gen = parse_adreno_generation(model);
     }
 
+    // Keep default TU_DEBUG strictly to safe, upstream-valid Turnip flags:
+    //   - Avoid `hiprio`: on Android KGSL submitqueue_priority_count is 1 (MEDIUM only),
+    //     so forcing HIGH makes vkCreateDevice fail with VK_ERROR_INITIALIZATION_FAILED
+    //     ("invalid global priority") whenever globalPriorityQuery is enabled.
+    //   - Avoid `dynamic`: Mesa test flag that disables native tiled VkRenderPass/GMEM.
+    //   - Avoid `deck_emu`: spoofs AMD Steam Deck PCI ID (0x1002), breaking native
+    //     Android games' mobile GPU detection (can still be set via TU_DEBUG env var).
+    //   - Avoid `noflushall`: not a valid Mesa TU_DEBUG token (flushall is off by default).
     if (gen == 0) {
-#ifdef OVERCLOCK
-        set_default_env("TU_DEBUG", "noconform,noflushall,dynamic,unaligned_store,deck_emu,forcecb");
-#else
-        set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu,forcecb");
-#endif
-        return;
+        set_default_env("TU_DEBUG", "noconform");
+        return 0;
     }
 
     switch (gen) {
         case 8:
-            ALOGI("Adreno 8xx (%s): sysmem + cache-coherent", gpuName);
+            ALOGI("Adreno 8xx (%s): cache-coherent path", gpuName);
             set_default_env("tu_override_uncached_as_cache_coherent", "true");
-            set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu");
+            set_default_env("TU_DEBUG", "noconform");
             break;
 
         case 7:
             ALOGI("Adreno 7xx (%s): autotuner path", gpuName);
             set_default_env("tu_override_uncached_as_cache_coherent", "true");
-            set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu");
+#ifdef OVERCLOCK
+            set_default_env("TU_DEBUG", "noconform,forcecb");
+#else
+            set_default_env("TU_DEBUG", "noconform");
+#endif
             break;
 
         default:
             ALOGI("Adreno 5xx/6xx (%s): stability path", gpuName);
             set_default_env("tu_override_uncached_as_cache_coherent", "true");
-            set_default_env("TU_DEBUG", "noconform,hiprio,noflushall,dynamic,deck_emu");
+            set_default_env("TU_DEBUG", "noconform");
             break;
     }
+
+    return gen;
 }
 
 // PanVK / ARM Mali (e.g. Mali-G52) environment configuration.
@@ -944,7 +1183,9 @@ static void init_custom_driver(JNIEnv *env, jobject context, DriverKind kind) {
 #endif
     }
 
-    ALOGI("%s hooks active", label);
+    ALOGI("%s hooks active (system UI bypass: %s)",
+          label,
+          g_hook_system_callers.load(std::memory_order_relaxed) ? "off" : "on");
 }
 
 static void init_turnip_driver(JNIEnv *env, jobject context) {
@@ -982,8 +1223,9 @@ static void global_atomic_init() {
     unsetenv("MESA_DISK_CACHE_READ_ONLY");
 
     // ─── Perf / debug ───
+    // Leave MESA_DEBUG unset by default so release builds stay quiet during normal
+    // rendering while still logging genuine TU/PanVK startup errors to logcat.
     set_default_env("GALLIUM_PRINT_OPTIONS",       "0");
-    set_default_env("MESA_DEBUG",                  "silent");
     set_default_env("MESA_NO_ERROR",               "1");
     set_default_env("MESA_GLTHREAD",               "true");
     set_default_env("vblank_mode",                 "0");
@@ -1005,9 +1247,6 @@ static void global_atomic_init() {
     __system_property_get("ro.build.version.sdk", sdk_str);
     int sdk = std::atoi(sdk_str);
     ALOGI("Android SDK: %d", sdk);
-
-    unsetenv("MESA_VK_VERSION_OVERRIDE");
-    unsetenv("FD_DEV_FEATURES");
 
     if (isMaliGpu()) {
         applyPanvkOptimizations();
@@ -1031,19 +1270,22 @@ static void global_atomic_init() {
             ALOGI("TU_OVERRIDE_HEAP_SIZE=%s MB (40%% of %lld MB RAM)", heap_str, total_mb);
         }
 
-        // Samsung One UI 6.0+ UBWC flag hint.
-        char oneui_str[PROP_VALUE_MAX] = {};
-        if (__system_property_get("ro.build.version.oneui", oneui_str) > 0) {
-            int raw = std::atoi(oneui_str);
-            if (raw >= 60000 && sdk >= 30) {
-                int major = raw / 10000;
-                int minor = (raw % 10000) / 100;
-                ALOGI("One UI %d.%d detected — enabling UBWC flag hint", major, minor);
-                set_default_env("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1");
+        int gen = applyTurnipOptimizations();
+
+        // Samsung One UI 6.0+ Adreno 7xx (a7xx_gen2 / S23) v7xx-blob UBWC flag hint.
+        // Scoped to Adreno 7xx so A5xx/A6xx/A8xx never receive an A7xx-only feature hint.
+        if (gen == 7) {
+            char oneui_str[PROP_VALUE_MAX] = {};
+            if (__system_property_get("ro.build.version.oneui", oneui_str) > 0) {
+                int raw = std::atoi(oneui_str);
+                if (raw >= 60000 && sdk >= 30) {
+                    int major = raw / 10000;
+                    int minor = (raw % 10000) / 100;
+                    ALOGI("One UI %d.%d on Adreno 7xx — enabling UBWC flag hint", major, minor);
+                    set_default_env("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1");
+                }
             }
         }
-
-        applyTurnipOptimizations();
     }
 
     // Defer ShadowHook + JNI initialization until after dlopen() releases the
