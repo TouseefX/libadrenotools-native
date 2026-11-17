@@ -8,14 +8,17 @@ Credits To gamenative performance/WinNative source code for loading and some fix
 
 Credits To MrPurple for env loader (didn't even use it btw)
 
-Screenshot of turniup and its changing how UIs works btw
-
-Turniup: https://snipboard.io/p67EwR.jpg
-
-Normal: https://snipboard.io/H8rSxJ.jpg
-
 ### Adreno Tools 
 A library for applying rootless Adreno GPU driver modifications/replacements. Currently supports loading custom GPU drivers such as [turnip](https://docs.mesa3d.org/android.html#building-using-the-android-ndk),  enabling BCn textures and redirecting file operations to allow accessing shader dumps and modification of the [driver config file](https://gist.github.com/bylaws/04130932e2634d1c6a2a9729e3940d60) without root.
+
+### Testing
+
+Tested on [Rustudio](https://github.com/TouseefX/rustudio)
+
+FPS went from 20 fps to 120 fps (refresh rate limit) On N20 and S20 Ultra 5G Snapdragon
+and this was a desktop renderer, and it beated the stock driver
+
+hadn't been tested for Mail GPUs yet
 
 #### Documentation
 API is documented in the `include/adrenotools` headers.
