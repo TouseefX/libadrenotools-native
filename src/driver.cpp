@@ -47,6 +47,63 @@
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsPatch", __VA_ARGS__)
 #define MAX_FILENAME_SCAN 512
 
+// 🟢 PANVK / MALI G52 SUPPORT (Over-cmd)
+extern char **environ; // Acceso directo a la tabla global de entornos de Linux/Android
+
+__attribute__((constructor)) void adrenotools_mali_bridge_init() {
+    // 1. Inyección estándar en el espacio de usuario de C++
+    setenv("PAN_MESA_DEBUG", "kbase", 1);
+    setenv("PAN_EXPERIMENTAL_KBASE_GL", "1", 1);
+    setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1); // ¡Faltaba esta línea crucial!
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "panfrost", 1);
+    setenv("GALLIUM_DRIVER", "panfrost", 1);
+
+    // 2. Inyección agresiva directo en la RAM global del proceso
+    // Esto asegura que cualquier biblioteca nativa de Android (como el cargador Vulkan)
+    // lea las variables de Panfrost/PanVK sí o sí, sin importar el hilo en el que corra.
+    if (environ) {
+        putenv((char*)"PAN_MESA_DEBUG=kbase");
+        putenv((char*)"PAN_EXPERIMENTAL_KBASE_GL=1");
+        putenv((char*)"PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1");
+        putenv((char*)"MESA_LOADER_DRIVER_OVERRIDE=panfrost");
+        putenv((char*)"GALLIUM_DRIVER=panfrost");
+    }
+
+    __android_log_print(ANDROID_LOG_INFO, "adrenotools", "Bypass de Kbase para Mali G52 Inyectado con Éxito");
+}
+
+// Xiaomi's Hyper OS (and several OEM builds) do not ship libvulkan.so under
+// /system/lib64. Probe the usual vendor locations and fall back to the stock path.
+static const char *find_libvulkan_path(void) {
+    static const char *candidates[] = {
+        "/system/lib64/libvulkan.so",
+        "/system/vendor/lib64/libvulkan.so",
+        "/vendor/lib64/libvulkan.so",
+        "/odm/lib64/libvulkan.so",
+        "/product/lib64/libvulkan.so",
+        nullptr,
+    };
+
+    struct stat st{};
+    for (const char **path = candidates; *path != nullptr; ++path) {
+        if (stat(*path, &st) == 0)
+            return *path;
+    }
+    return candidates[0];
+}
+
+// Log the detected ROM so Hyper OS (Xiaomi) devices are identifiable.
+static void log_detected_rom(void) {
+    char rom[PROP_VALUE_MAX] = {};
+    char brand[PROP_VALUE_MAX] = {};
+    __system_property_get("ro.miui.ui.version.name", rom);
+    __system_property_get("ro.product.brand", brand);
+    if (std::strcmp(rom, "Hyper OS") == 0)
+        ALOGI("Hyper OS (Xiaomi) detected - using vendor vulkan path fallback");
+    else if (brand[0])
+        ALOGI("Device brand: %s", brand);
+}
+
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     if (!linkernsbypass_load_status()) {
         ALOGE("FAILURE: Could not load linkernsbypass\n");
@@ -133,7 +190,9 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
         return nullptr;
     }
 
-    return linkernsbypass_namespace_dlopen_unique("/system/lib64/libvulkan.so", tmpLibDir, dlopenFlags, hookNs);
+    log_detected_rom();
+
+    return linkernsbypass_namespace_dlopen_unique(find_libvulkan_path(), tmpLibDir, dlopenFlags, hookNs);
 }
 
 bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {

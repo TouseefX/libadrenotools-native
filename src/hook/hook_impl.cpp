@@ -1,5 +1,6 @@
 #include <initializer_list>
 #include <string>
+#include <mutex>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -21,7 +22,9 @@ const HookImplParams *hook_params; //!< Bunch of info needed to load/patch the d
 int (*gsl_memory_alloc_pure_sym)(uint32_t, uint32_t, void *);
 int (*gsl_memory_alloc_pure_64_sym)(uint64_t, uint32_t, void *);
 int (*gsl_memory_free_pure_sym)(void *);
-int kgsl_fd;
+// Inicializamos en -1 para evitar conflictos con el descriptor 0 (stdin)
+int kgsl_fd = -1;
+std::mutex kgsl_mutex; // Mutex to protect multi-threaded access under Mesa 26
 
 using gsl_memory_alloc_pure_t = decltype(gsl_memory_alloc_pure_sym);
 using gsl_memory_alloc_pure_64_t = decltype(gsl_memory_alloc_pure_64_sym);
@@ -201,44 +204,40 @@ __attribute__((visibility("default"))) int hook_gsl_memory_alloc_pure_64(uint64_
     }
 }
 
-// 🟢 CORRECCIÓN MALI: Liberación limpia sin comandos KGSL cruzados
+// 🟢 CORRECCIÓN MALI: Liberación limpia segura para multihilos y sin llamadas ioctl de Adreno
 __attribute__((visibility("default"))) int hook_gsl_memory_free_pure(void *memDesc) {
     auto gslMemDesc{reinterpret_cast<GslMemDesc *>(memDesc)};
 
     if (gslMemDesc->priv == GslMemDescImportedPrivMagic) {
-        if (!kgsl_fd) {
-            kgsl_fd = open("/dev/mali0", O_RDWR);
-            if (kgsl_fd >= 0) {
-                // Si /dev/mali0 abrió bien, liberamos memoria local con munmap
-                if (gslMemDesc->hostptr) {
-                    munmap(gslMemDesc->hostptr, gslMemDesc->size);
+        {
+            std::lock_guard<std::mutex> lock(kgsl_mutex);
+            if (kgsl_fd < 0) {
+                kgsl_fd = open("/dev/mali0", O_RDWR);
+                if (kgsl_fd < 0) {
+                    kgsl_fd = open("/dev/kgsl-3d0", O_RDWR);
                 }
-                gslMemDesc->hostptr = nullptr;
-                gslMemDesc->gpuaddr = 0;
-                return 0;
-            } else {
-                // Si no hay Mali, intentamos abrir Adreno
-                kgsl_fd = open("/dev/kgsl-3d0", O_RDWR);
             }
         }
 
-        // 🔴 COMPORTAMIENTO ADRENO: Solo se ejecuta si estamos en Qualcomm
+        // Perform local cleanup on Mali hardware safely
+        if (gslMemDesc->hostptr) {
+            munmap(gslMemDesc->hostptr, gslMemDesc->size);
+        }
+        gslMemDesc->hostptr = nullptr;
+        gslMemDesc->gpuaddr = 0;
+
+        // If for some reason it's running on a real Adreno environment, run its ioctl isolated
         if (kgsl_fd >= 0) {
             kgsl_gpumem_get_info info{
                 .gpuaddr = gslMemDesc->gpuaddr
             };
 
-            if (ioctl(kgsl_fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) < 0) {
-                LOGI("IOCTL_KGSL_GPUMEM_GET_INFO failed");
-                return 0;
+            if (ioctl(kgsl_fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) >= 0) {
+                kgsl_gpuobj_free args{
+                    .id = info.id,
+                };
+                ioctl(kgsl_fd, IOCTL_KGSL_GPUOBJ_FREE, &args);
             }
-
-            kgsl_gpuobj_free args{
-                .id = info.id,
-            };
-
-            if (ioctl(kgsl_fd, IOCTL_KGSL_GPUOBJ_FREE, &args) < 0)
-                LOGI("IOCTL_KGSL_GPUOBJ_FREE failed");
         }
 
         return 0;
