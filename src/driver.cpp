@@ -526,7 +526,8 @@ static void init_turnip_driver(JNIEnv* env, jobject context) {
 
     snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
     ALOGI("Native Lib Dir: %s", fixed_dir);
-    setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+    setenv("MESA_VULKAN_ICD_SELECT", "turnip", 1);
 	
     prime_jni_cache(env);
     jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
@@ -622,6 +623,7 @@ static void init_panvk_driver(JNIEnv* env, jobject context) {
     snprintf(fixed_dir, sizeof(fixed_dir), "%s/", native_lib_dir);
     ALOGI("Native Lib Dir: %s", fixed_dir);
     setenv("MESA_LIBGL_DRIVERS_PATH", fixed_dir, 1);
+    setenv("MESA_VULKAN_ICD_SELECT", "panvk", 1);
 
     prime_jni_cache(env);
     jobject cacheFileObj = env->CallObjectMethod(context, g_jni_cache.getCacheDir);
@@ -692,7 +694,8 @@ static void schedule_native_jni_init();
 __attribute__((constructor))
 static void global_atomic_init() {
     // ─── Core Mesa/Vulkan env ───
-    setenv("MESA_VULKAN_ICD_SELECT",              "turnip",   1);
+    // MESA_VULKAN_ICD_SELECT is set per-driver in init_turnip_driver / init_panvk_driver
+    // so PanVK on Mali isn't overridden by the Turnip default.
     setenv("MESA_VK_IGNORE_CONFORMANCE_WARNING",  "1",        1);
     setenv("MESA_VK_IGNORE_CONFORMANCE_ERRORS",   "1",        1);
     setenv("MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE", "1", 1);
