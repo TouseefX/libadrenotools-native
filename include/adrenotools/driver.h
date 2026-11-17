@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <jni.h>
 #include "priv.h"
 
 /**
@@ -77,6 +78,19 @@ void adrenotools_set_turbo(bool turbo);
  * @return true on success, false if varName or value is NULL
  */
 bool adrenotools_set_freedreno_env(const char *varName, const char *value);
+
+/**
+ * @brief Initialize the PanVK (ARM Mali) Vulkan driver.
+ * @param vm The JavaVM pointer (from JNI_OnLoad or JNI_GetCreatedJavaVMs).
+ *
+ * Loads libvulkan_panfrost.so (Mesa's PanVK driver, the ARM Mali equivalent
+ * of Turnip for Adreno) using the same isolated-namespace mechanism as the
+ * Turnip loader. The library attempts this automatically in perform_init when
+ * a Mali GPU is detected; call this to force initialization manually.
+ * Must be called after the JVM is available (e.g. from JNI_OnLoad or native
+ * init).
+ */
+void adrenotools_init_panvk_driver(JavaVM* vm);
 
 #ifdef __cplusplus
 }
