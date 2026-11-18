@@ -1,10 +1,13 @@
-cmake_minimum_required(VERSION 3.14...4.3)
+cmake_minimum_required(VERSION 3.14)
 
 if(NOT ${CMAKE_ANDROID_ARCH_ABI} STREQUAL arm64-v8a)
 	message(FATAL_ERROR "Unsupported target architecture: ${CMAKE_ANDROID_ARCH_ABI}. Please make an issue on the repo!")
 endif()
 
 project(adrenotools LANGUAGES CXX C)
+# Rust is handled entirely via custom commands (cargo build + cxxbridge codegen),
+# not via CMake's built-in Rust language support (which doesn't work well with
+# Android NDK cross-compilation).
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
@@ -58,15 +61,97 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(bytehook)
 
+# ─── Rust + cxx static library (memory-safe layer) ───────────────────────────
+# Builds rust/ with cargo + cxx for the Android target. The cxx bridge
+# generates a C++ header from rust/src/lib.rs so C++ can call Rust safely.
+# Requires: cargo, rustc, cxxbridge, aarch64-linux-android target.
+set(ADRENOTOOLS_RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rust")
+set(ADRENOTOOLS_RUST_TARGET "aarch64-linux-android")
+set(ADRENOTOOLS_RUST_LIB "${CMAKE_CURRENT_BINARY_DIR}/rust/target/${ADRENOTOOLS_RUST_TARGET}/release/libadrenotools_rs.a")
+set(ADRENOTOOLS_RUST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/rust/ffi.h")
+set(ADRENOTOOLS_RUST_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/rust/ffi.cc")
+
+# Find Rust toolchain
+find_program(CARGO_PROGRAM cargo)
+find_program(RUSTC_PROGRAM rustc)
+find_program(CXXBRIDGE_PROGRAM cxxbridge)
+
+set(ADRENOTOOLS_RUST_AVAILABLE FALSE)
+if(CARGO_PROGRAM AND RUSTC_PROGRAM AND CXXBRIDGE_PROGRAM AND EXISTS "${ADRENOTOOLS_RUST_DIR}/Cargo.toml")
+    set(ADRENOTOOLS_RUST_AVAILABLE TRUE)
+    message(STATUS "Rust toolchain found: cargo=${CARGO_PROGRAM}, rustc=${RUSTC_PROGRAM}, cxxbridge=${CXXBRIDGE_PROGRAM}")
+else()
+    message(STATUS "Rust toolchain not found — building C++ only (mailbox and GPU mapping stay in C++)")
+endif()
+
+if(ADRENOTOOLS_RUST_AVAILABLE)
+    # ── Step 1: Generate the C++ side of the cxx bridge ──
+    # cxxbridge writes the declarations (ffi.h) and the definitions of the C++
+    # wrappers that call the Rust shims (ffi.cc). Both are needed: without
+    # ffi.cc every ffi::… call is an undefined reference at link time. The
+    # generated files embed the parts of cxx.h they use, so no cxx.h lookup
+    # is necessary. -o avoids shell redirection under VERBATIM.
+    set(ADRENOTOOLS_RUST_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/rust/ffi.cc")
+    add_custom_command(
+        OUTPUT "${ADRENOTOOLS_RUST_HEADER}" "${ADRENOTOOLS_RUST_SOURCE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/rust"
+        COMMAND "${CXXBRIDGE_PROGRAM}" "${ADRENOTOOLS_RUST_DIR}/src/lib.rs" --header -o "${ADRENOTOOLS_RUST_HEADER}"
+        COMMAND "${CXXBRIDGE_PROGRAM}" "${ADRENOTOOLS_RUST_DIR}/src/lib.rs" -o "${ADRENOTOOLS_RUST_SOURCE}"
+        WORKING_DIRECTORY "${ADRENOTOOLS_RUST_DIR}"
+        DEPENDS "${ADRENOTOOLS_RUST_DIR}/src/lib.rs"
+        COMMENT "Generating C++ bridge (ffi.h, ffi.cc) from rust/src/lib.rs"
+        VERBATIM
+    )
+
+    # ── Step 2: Build Rust static library ──
+    add_custom_command(
+        OUTPUT "${ADRENOTOOLS_RUST_LIB}"
+        COMMAND ${CMAKE_COMMAND} -E env "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/rust/target"
+                    "${CARGO_PROGRAM}" build --release --verbose --manifest-path "${ADRENOTOOLS_RUST_DIR}/Cargo.toml" --target "${ADRENOTOOLS_RUST_TARGET}"
+        WORKING_DIRECTORY "${ADRENOTOOLS_RUST_DIR}"
+        DEPENDS "${ADRENOTOOLS_RUST_DIR}/Cargo.toml" "${ADRENOTOOLS_RUST_DIR}/src/lib.rs"
+        COMMENT "Building Rust static library (adrenotools_rs)"
+        VERBATIM
+    )
+    add_custom_target(adrenotools_rs DEPENDS "${ADRENOTOOLS_RUST_LIB}" "${ADRENOTOOLS_RUST_HEADER}" "${ADRENOTOOLS_RUST_SOURCE}")
+
+    # The generated C++ wrappers, compiled once and linked into every target
+    # that calls ffi::… (adrenotools, hook_impl). Carries the include path of
+    # the generated header and the Rust staticlib itself as usage
+    # requirements, so consumers get "… libadrenotools_cxxbridge.a
+    # libadrenotools_rs.a" *after* their own objects — the order both GNU ld
+    # and lld resolve (a target_link_options() archive comes before the
+    # objects and only works because lld is lenient about it). A full path in
+    # target_link_libraries() is not checked for existence at configure time;
+    # the add_dependencies() makes cargo run first.
+    add_library(adrenotools_cxxbridge STATIC "${ADRENOTOOLS_RUST_SOURCE}")
+    target_include_directories(adrenotools_cxxbridge PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/rust")
+    target_compile_features(adrenotools_cxxbridge PUBLIC cxx_std_17)
+    set_target_properties(adrenotools_cxxbridge PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(adrenotools_cxxbridge PUBLIC "${ADRENOTOOLS_RUST_LIB}")
+    add_dependencies(adrenotools_cxxbridge adrenotools_rs)
+endif()
+
+# ─── C++ sources ─────────────────────────────────────────────────────────────
+# mailbox.cpp is always compiled: it uses #ifdef ADRENOTOOLS_RUST_ENABLED to
+# delegate to Rust when available, falling back to C++ libc wrappers otherwise.
 set(LIB_SOURCES src/bcenabler.cpp
                 src/driver.cpp
                 src/mailbox.cpp
                 include/adrenotools/bcenabler.h
                 include/adrenotools/driver.h
-                include/adrenotools/mailbox.h
                 include/adrenotools/priv.h)
 
 add_library(adrenotools ${LIB_SOURCES})
+
+if(ADRENOTOOLS_RUST_AVAILABLE)
+    # adrenotools_cxxbridge brings the generated header's include path and
+    # the Rust staticlib (linked after the objects that reference it).
+    target_link_libraries(adrenotools adrenotools_cxxbridge)
+    target_compile_definitions(adrenotools PRIVATE ADRENOTOOLS_RUST_ENABLED)
+
+    add_dependencies(adrenotools adrenotools_rs)
+endif()
 
 target_include_directories(adrenotools PUBLIC include)
 target_include_directories(adrenotools PRIVATE .)

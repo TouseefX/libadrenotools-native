@@ -5,6 +5,16 @@ target_link_libraries(hook_impl linkernsbypass log)
 target_include_directories(hook_impl PRIVATE ../../include)
 set_target_properties(hook_impl PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
+# Enable the cxx bridge when available, so hook_impl can call
+# ffi::try_consume_pending / ffi::set_pending_mapping. adrenotools_cxxbridge
+# (top-level CMakeLists.txt) carries the generated header's include path and
+# the Rust staticlib, linked after hook_impl's own objects.
+if(ADRENOTOOLS_RUST_AVAILABLE)
+    target_compile_definitions(hook_impl PRIVATE ADRENOTOOLS_RUST_ENABLED)
+    target_link_libraries(hook_impl adrenotools_cxxbridge)
+    add_dependencies(hook_impl adrenotools_rs)
+endif()
+
 add_library(main_hook SHARED main_hook.c)
 
 target_compile_options(main_hook PRIVATE -Wall -Wextra)
