@@ -63,8 +63,8 @@ Please create an issue if support for anything else is desired.
 
 #### Recommended Drivers
 
-- [Native Android Drivers (Banners-Turnip)](https://github.com/TGMGT/Banners-Turnip/releases)
-- [MrPurple Driver (Performance)](https://github.com/MrPurple666/purple-turnip/releases)
+- [nihui Mesa Turnip Android Driver](https://github.com/nihui/mesa-turnip-android-driver)
+- [JimVulkan Mali PanVK](https://github.com/JimVulkan/mali-panvk)
 - Freedeno Drivers
 
 ### FAQ
