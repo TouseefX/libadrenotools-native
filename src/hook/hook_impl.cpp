@@ -3,6 +3,7 @@
 #include <mutex>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -15,8 +16,16 @@
 #include "hook_impl.h"
 #include <sys/system_properties.h>
 
+// When Rust is available, delegate GPU mapping management to the Rust layer
+// via the cxx bridge (compile-time checked, no unsafe FFI boundary).
+// Falls back to the original C++ nextGpuMapping + kgsl_mutex implementation.
+#ifdef ADRENOTOOLS_RUST_ENABLED
+#include <adrenotools/adrenotools_rs.h>
+#endif  // ADRENOTOOLS_RUST_ENABLED
+
 #define TAG "hook_impl"
 #define LOGI(fmt, ...) __android_log_print(ANDROID_LOG_INFO, TAG, fmt, ##__VA_ARGS__)
+#define LOGW(fmt, ...) __android_log_print(ANDROID_LOG_WARN, TAG, fmt, ##__VA_ARGS__)
 
 const HookImplParams *hook_params; //!< Bunch of info needed to load/patch the driver
 int (*gsl_memory_alloc_pure_sym)(uint32_t, uint32_t, void *);
@@ -120,6 +129,20 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
                 initGsl(gsl_memory_alloc_pure_sym, gsl_memory_alloc_pure_64_sym, gsl_memory_free_pure_sym);
                 LOGI("hook_android_dlopen_ext: applied libgsl_alloc_hook");
                 hook_params->nextGpuMapping->gpu_addr = ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC;
+
+#ifdef ADRENOTOOLS_RUST_ENABLED
+                // Register the pending mapping with Rust's thread-safe GpuMappingManager so
+                // hook_gsl_memory_alloc_pure_64 can consume it via ffi::try_consume_pending
+                // without racing on hook_params->nextGpuMapping.
+                ffi::GpuMapping rs_mapping{
+                    reinterpret_cast<uintptr_t>(hook_params->nextGpuMapping->host_ptr),
+                    hook_params->nextGpuMapping->gpu_addr,
+                    hook_params->nextGpuMapping->size,
+                    hook_params->nextGpuMapping->flags,
+                    ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC,
+                };
+                ffi::set_pending_mapping(rs_mapping);
+#endif  // ADRENOTOOLS_RUST_ENABLED
             }
         }
 
@@ -185,23 +208,49 @@ struct GslMemDesc {
 
 __attribute__((visibility("default"))) int hook_gsl_memory_alloc_pure_64(uint64_t size, uint32_t flags, void *memDesc) {
     auto gslMemDesc{reinterpret_cast<GslMemDesc *>(memDesc)};
-    if (hook_params->nextGpuMapping && hook_params->nextGpuMapping->size == size && (hook_params->nextGpuMapping->flags & flags) == hook_params->nextGpuMapping->flags) {
-        auto &nextMapping{*hook_params->nextGpuMapping};
 
-        gslMemDesc->hostptr = nextMapping.host_ptr;
-        gslMemDesc->gpuaddr = nextMapping.gpu_addr;
-        gslMemDesc->size = nextMapping.size;
-        gslMemDesc->flags = nextMapping.flags;
+#ifdef ADRENOTOOLS_RUST_ENABLED
+    // Delegate pending-mapping consumption to Rust's thread-safe GpuMappingManager.
+    // The Rust manager holds its own Mutex<Option<GpuMapping>> — no data race on
+    // hook_params->nextGpuMapping, which previously caused intermittent GPU crashes
+    // and full device reboots.
+    // magic == 0 means "no pending mapping available".
+    ffi::GpuMapping mapping = ffi::try_consume_pending(size, flags);
+    if (mapping.magic != 0) {
+        gslMemDesc->hostptr = reinterpret_cast<void *>(mapping.host_ptr);
+        gslMemDesc->gpuaddr = mapping.gpu_addr;
+        gslMemDesc->size = mapping.size;
+        gslMemDesc->flags = mapping.flags;
         gslMemDesc->priv = GslMemDescImportedPrivMagic;
-        hook_params->nextGpuMapping->size = 0;
-        hook_params->nextGpuMapping->gpu_addr = ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC;
         return 0;
-    } else {
-        if (gsl_memory_alloc_pure_64_sym)
-            return gsl_memory_alloc_pure_64_sym(size, flags, gslMemDesc);
-        else
-            return gsl_memory_alloc_pure_sym((uint32_t)size, flags, gslMemDesc);
     }
+#else
+    // Guard nextGpuMapping with kgsl_mutex — Vulkan is multithreaded and two
+    // threads can race on the same pending mapping, causing one to zero it
+    // while another reads it, corrupting GPU memory mappings and crashing the
+    // GPU device.
+    {
+        std::lock_guard<std::mutex> lock(kgsl_mutex);
+        if (hook_params->nextGpuMapping && hook_params->nextGpuMapping->size == size && (hook_params->nextGpuMapping->flags & flags) == hook_params->nextGpuMapping->flags) {
+            auto &nextMapping{*hook_params->nextGpuMapping};
+
+            gslMemDesc->hostptr = nextMapping.host_ptr;
+            gslMemDesc->gpuaddr = nextMapping.gpu_addr;
+            gslMemDesc->size = nextMapping.size;
+            gslMemDesc->flags = nextMapping.flags;
+            gslMemDesc->priv = GslMemDescImportedPrivMagic;
+            hook_params->nextGpuMapping->size = 0;
+            hook_params->nextGpuMapping->gpu_addr = ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC;
+            return 0;
+        }
+    }
+#endif  // ADRENOTOOLS_RUST_ENABLED
+
+    // Fall through to the real GSL allocator when no pending mapping matches.
+    if (gsl_memory_alloc_pure_64_sym)
+        return gsl_memory_alloc_pure_64_sym(size, flags, gslMemDesc);
+    else
+        return gsl_memory_alloc_pure_sym((uint32_t)size, flags, gslMemDesc);
 }
 
 // 🟢 CORRECCIÓN MALI: Liberación limpia segura para multihilos y sin llamadas ioctl de Adreno
@@ -209,13 +258,22 @@ __attribute__((visibility("default"))) int hook_gsl_memory_free_pure(void *memDe
     auto gslMemDesc{reinterpret_cast<GslMemDesc *>(memDesc)};
 
     if (gslMemDesc->priv == GslMemDescImportedPrivMagic) {
-        {
-            std::lock_guard<std::mutex> lock(kgsl_mutex);
+        // Save the original GPU address BEFORE zeroing — GET_IOCTL needs it to
+        // look up the GPU object ID. Zeroing first caused GET_INFO to receive
+        // gpuaddr=0, fail, and then GPUOBJ_FREE would be called with a garbage
+        // object ID — potentially freeing a GPU object still in use, crashing
+        // the KGSL driver and rebooting the device.
+        const uint64_t gpuaddr = gslMemDesc->gpuaddr;
+
+        // Entire body under kgsl_mutex: two threads freeing concurrently would
+        // race on shared kgsl_fd and gslMemDesc fields, causing memory
+        // corruption and intermittent GPU crashes.
+        std::lock_guard<std::mutex> lock(kgsl_mutex);
+
+        if (kgsl_fd < 0) {
+            kgsl_fd = open("/dev/mali0", O_RDWR);
             if (kgsl_fd < 0) {
-                kgsl_fd = open("/dev/mali0", O_RDWR);
-                if (kgsl_fd < 0) {
-                    kgsl_fd = open("/dev/kgsl-3d0", O_RDWR);
-                }
+                kgsl_fd = open("/dev/kgsl-3d0", O_RDWR);
             }
         }
 
@@ -227,16 +285,18 @@ __attribute__((visibility("default"))) int hook_gsl_memory_free_pure(void *memDe
         gslMemDesc->gpuaddr = 0;
 
         // If for some reason it's running on a real Adreno environment, run its ioctl isolated
-        if (kgsl_fd >= 0) {
+        if (kgsl_fd >= 0 && gpuaddr != 0) {
             kgsl_gpumem_get_info info{
-                .gpuaddr = gslMemDesc->gpuaddr
+                .gpuaddr = gpuaddr,
             };
 
-            if (ioctl(kgsl_fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) >= 0) {
+            if (ioctl(kgsl_fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) >= 0 && info.id != 0) {
                 kgsl_gpuobj_free args{
                     .id = info.id,
                 };
-                ioctl(kgsl_fd, IOCTL_KGSL_GPUOBJ_FREE, &args);
+                if (ioctl(kgsl_fd, IOCTL_KGSL_GPUOBJ_FREE, &args) < 0) {
+                    LOGW("IOCTL_KGSL_GPUOBJ_FREE failed for id=%u", info.id);
+                }
             }
         }
 

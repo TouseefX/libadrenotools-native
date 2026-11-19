@@ -16,6 +16,44 @@
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, "AdrenoToolsMailbox", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AdrenoToolsMailbox", __VA_ARGS__)
 
+// When the Rust toolchain is available, delegate mailbox access to the Rust
+// layer (safe libc wrappers, no manual unsafe FFI boundary). Otherwise fall
+// back to the C++ implementation below.
+#ifdef ADRENOTOOLS_RUST_ENABLED
+#include <adrenotools/adrenotools_rs.h>
+
+int adrenotools_mailbox_open(const char *dev) {
+    if (!dev) {
+        ALOGE("adrenotools_mailbox_open: null device path");
+        return -1;
+    }
+    return ffi::mailbox_open(rust::Str(dev));
+}
+
+bool adrenotools_mailbox_read(int fd, uint32_t offset, uint32_t *val) {
+    if (fd < 0 || !val) {
+        ALOGE("adrenotools_mailbox_read: invalid arguments");
+        return false;
+    }
+    return ffi::mailbox_read(fd, offset, *val);
+}
+
+bool adrenotools_mailbox_write(int fd, uint32_t offset, uint32_t val) {
+    if (fd < 0) {
+        ALOGE("adrenotools_mailbox_write: invalid fd");
+        return false;
+    }
+    return ffi::mailbox_write(fd, offset, val);
+}
+
+void adrenotools_mailbox_close(int fd) {
+    if (fd >= 0) {
+        ffi::mailbox_close(fd);
+    }
+}
+
+#else  // ADRENOTOOLS_RUST_ENABLED
+
 int adrenotools_mailbox_open(const char *dev) {
     if (!dev) {
         ALOGE("adrenotools_mailbox_open: null device path");
@@ -74,3 +112,5 @@ void adrenotools_mailbox_close(int fd) {
         close(fd);
     }
 }
+
+#endif  // ADRENOTOOLS_RUST_ENABLED

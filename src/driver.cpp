@@ -6,6 +6,13 @@
 #include "hook/kgsl.h"
 #include "hook/hook_impl_params.h"
 
+// When Rust is available, register pending GPU mappings with the Rust
+// GpuMappingManager via the cxx bridge so hook_gsl_memory_alloc_pure_64 can
+// consume them thread-safely without racing on hook_params->nextGpuMapping.
+#ifdef ADRENOTOOLS_RUST_ENABLED
+#include <adrenotools/adrenotools_rs.h>
+#endif  // ADRENOTOOLS_RUST_ENABLED
+
 #include <android/api-level.h>
 #include <android/dlext.h>
 #include <android/log.h>
@@ -316,6 +323,11 @@ void *adrenotools_open_libvulkan(int dlopenFlags,
         const char *err = dlerror();
         ALOGE("FAILURE: Couldn't load libmain_hook.so from %s: %s",
               hookLibDir, err ? err : "unknown");
+        // Clean up the mapping we allocated — caller gets nullptr back.
+        if (importMapping) {
+            delete importMapping;
+            *userMappingHandle = nullptr;
+        }
         return nullptr;
     }
 
@@ -367,6 +379,19 @@ bool adrenotools_import_user_mem(void *handle, void *hostPtr, uint64_t size) {
     importMapping->size     = size;
     importMapping->flags    = 0xc2600;
 
+#ifdef ADRENOTOOLS_RUST_ENABLED
+    // Register the imported mapping with Rust's thread-safe GpuMappingManager so
+    // hook_gsl_memory_alloc_pure_64 can consume it via ffi::try_consume_pending.
+    ffi::GpuMapping rs_mapping{
+        reinterpret_cast<uintptr_t>(importMapping->host_ptr),
+        importMapping->gpu_addr,
+        importMapping->size,
+        importMapping->flags,
+        ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC,
+    };
+    ffi::set_pending_mapping(rs_mapping);
+#endif  // ADRENOTOOLS_RUST_ENABLED
+
     close(kgslFd);
     return true;
 }
@@ -404,6 +429,19 @@ bool adrenotools_mem_gpu_allocate(void *handle, uint64_t *size) {
     mapping->size     = *size;
     mapping->flags    = 0xc2600;
 
+#ifdef ADRENOTOOLS_RUST_ENABLED
+    // Register the allocated mapping with Rust's thread-safe GpuMappingManager so
+    // hook_gsl_memory_alloc_pure_64 can consume it via ffi::try_consume_pending.
+    ffi::GpuMapping rs_mapping{
+        reinterpret_cast<uintptr_t>(mapping->host_ptr),
+        mapping->gpu_addr,
+        mapping->size,
+        mapping->flags,
+        ADRENOTOOLS_GPU_MAPPING_SUCCEEDED_MAGIC,
+    };
+    ffi::set_pending_mapping(rs_mapping);
+#endif  // ADRENOTOOLS_RUST_ENABLED
+
     close(kgslFd);
     return true;
 }
@@ -411,6 +449,22 @@ bool adrenotools_mem_gpu_allocate(void *handle, uint64_t *size) {
 bool adrenotools_mem_cpu_map(void *handle, void *hostPtr, uint64_t size) {
     if (!handle || size == 0) return false;
     auto mapping = reinterpret_cast<adrenotools_gpu_mapping *>(handle);
+
+    // MAP_FIXED requires page-aligned address and length. Unaligned hostPtr can
+    // silently unmap adjacent valid memory or corrupt the caller's buffer.
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return false;
+    if (reinterpret_cast<uintptr_t>(hostPtr) % static_cast<uintptr_t>(page_size) != 0) {
+        ALOGE("adrenotools_mem_cpu_map: hostPtr %p not page-aligned (page_size=%ld)",
+              hostPtr, page_size);
+        return false;
+    }
+    const uint64_t page_size_u64 = static_cast<uint64_t>(page_size);
+    if (size % page_size_u64 != 0) {
+        ALOGE("adrenotools_mem_cpu_map: size %llu not page-aligned (page_size=%ld)",
+              static_cast<unsigned long long>(size), page_size);
+        return false;
+    }
 
     int kgslFd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
     if (kgslFd < 0)
@@ -444,10 +498,15 @@ void adrenotools_set_turbo(bool turbo) {
     };
 
     int kgslFd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
-    if (kgslFd < 0)
+    if (kgslFd < 0) {
+        ALOGW("adrenotools_set_turbo: cannot open /dev/kgsl-3d0 (errno %d)", errno);
         return;
+    }
 
-    ioctl(kgslFd, IOCTL_KGSL_SETPROPERTY, &prop);
+    if (ioctl(kgslFd, IOCTL_KGSL_SETPROPERTY, &prop) < 0) {
+        ALOGW("adrenotools_set_turbo: IOCTL_KGSL_SETPROPERTY(KGSL_PROP_PWRCTRL) failed (errno %d) — this ioctl can crash the KGSL driver on some Adreno kernels", errno);
+    }
+
     close(kgslFd);
 }
 
@@ -1166,22 +1225,25 @@ static void init_custom_driver(JNIEnv *env, jobject context, DriverKind kind) {
     ALOGI("%s loaded — installing Vulkan ShadowHooks", label);
     if (!install_vulkan_hooks_locked()) {
         ALOGE("%s: required ShadowHook installation failed", label);
+        dlclose(handle);
         return;
     }
 
     if (!is_panvk) {
 #ifdef OVERCLOCK
-        ALOGI("Overclock mode — turbo + priority boost");
-        adrenotools_set_turbo(true);
+        ALOGI("Overclock mode — priority boost (turbo disabled by default to prevent GPU reboots)");
         if (setpriority(PRIO_PROCESS, 0, -20) != 0) {
             ALOGI("setpriority -20 denied, trying -10");
             setpriority(PRIO_PROCESS, 0, -10);
         }
 #else
         ALOGI("Standard mode");
-        adrenotools_set_turbo(false);
 #endif
     }
+    // NOTE: adrenotools_set_turbo() is intentionally NOT called automatically.
+    // IOCTL_KGSL_SETPROPERTY with KGSL_PROP_PWRCTRL can crash the KGSL driver
+    // on some Adreno kernels, causing a full device reboot. Call it manually
+    // via the public API only if you need it and have tested on your device.
 
     ALOGI("%s hooks active (system UI bypass: %s)",
           label,

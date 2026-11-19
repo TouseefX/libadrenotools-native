@@ -1,5 +1,5 @@
 name: Build libadrenotools
-on: 
+on:
   workflow_dispatch:
     inputs:
       enable_overclock:
@@ -29,13 +29,78 @@ jobs:
           chmod +x cmake-4.3.4-linux-x86_64.sh
           sudo ./cmake-4.3.4-linux-x86_64.sh --skip-license --prefix=/usr/local
           cmake --version
-      
-      - name: Build with CMake
+
+      - name: Set up Rust toolchain (stable + Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cxxbridge (cxx FFI codegen)
+        run: cargo install cxxbridge-cmd
+
+      - name: Configure Rust Android linker
         run: |
+          # Point cargo at the NDK clang so it can link for aarch64-linux-android
+          ANDROID_CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang"
+          ANDROID_CLANGXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang++"
+          if [ ! -x "$ANDROID_CLANG" ]; then
+            ANDROID_CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-clang"
+            ANDROID_CLANGXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-clang++"
+          fi
+          # Export target-specific env vars only. Do NOT set CC/CXX globally
+          # as that would break host compilation of build scripts (e.g. cc crate).
+          echo "ANDROID_CLANG=$ANDROID_CLANG" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_CLANG" >> $GITHUB_ENV
+          echo "CC_aarch64_linux_android=$ANDROID_CLANG" >> $GITHUB_ENV
+          echo "CXX_aarch64_linux_android=$ANDROID_CLANGXX" >> $GITHUB_ENV
+          echo "Rust Android linker configured: CC_aarch64_linux_android=$ANDROID_CLANG CXX_aarch64_linux_android=$ANDROID_CLANGXX"
+
+      - name: Install host g++ (needed by link-cplusplus crate)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq g++
+
+      - name: Fetch Rust dependencies (populates cargo registry with cxx.h)
+        run: |
+          cd rust
+          cargo fetch --target aarch64-linux-android
+          echo "=== cxx.h locations ==="
+          find "$HOME/.cargo/registry/src" -name "cxx.h" 2>/dev/null | head -5
+
+      - name: Configure Rust Android linker
+        run: |
+          # Point cargo at the NDK clang so it can link for aarch64-linux-android
+          ANDROID_CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang"
+          ANDROID_CLANGXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang++"
+          ANDROID_AR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          if [ ! -x "$ANDROID_CLANG" ]; then
+            ANDROID_CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-clang"
+            ANDROID_CLANGXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-clang++"
+            ANDROID_AR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar"
+          fi
+          # Export target-specific env vars only. Do NOT set CC/CXX globally
+          # as that would break host compilation of build scripts (e.g. cc crate).
+          echo "ANDROID_CLANG=$ANDROID_CLANG" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_CLANG" >> $GITHUB_ENV
+          echo "CC_aarch64_linux_android=$ANDROID_CLANG" >> $GITHUB_ENV
+          echo "CXX_aarch64_linux_android=$ANDROID_CLANGXX" >> $GITHUB_ENV
+          echo "AR_aarch64_linux_android=$ANDROID_AR" >> $GITHUB_ENV
+          echo "Rust Android linker configured: CC_aarch64_linux_android=$ANDROID_CLANG CXX_aarch64_linux_android=$ANDROID_CLANGXX AR_aarch64_linux_android=$ANDROID_AR"
+
+      - name: Build with CMake (Rust auto-detected)
+        run: |
+          set +e
           git submodule update --init --recursive
           mkdir build && cd build
           OVERCLOCK_FLAG=${{ github.event.inputs.enable_overclock == 'true' && 'ON' || 'OFF' }}
-          
+
+          echo "=== Rust toolchain check ==="
+          which cargo && cargo --version
+          which rustc && rustc --version
+          which cxxbridge && cxxbridge --version
+          echo "HOME=$HOME"
+          ls "$HOME/.cargo/registry/src/" 2>/dev/null || echo "No cargo registry src"
+          ls "$HOME/.cargo/bin/" 2>/dev/null || echo "No cargo bin"
+
+          echo "=== Running cmake ==="
           cmake .. -Wno-dev \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
@@ -45,19 +110,126 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DANDROID_STL=c++_static \
             -Dlinkernsbypass_BUILD_SHARED=ON \
-            -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG
-          
-          make -j$(nproc)
+            -DOVERCLOCK_BUILD=$OVERCLOCK_FLAG > cmake_config.log 2>&1
+          CMake_EXIT=$?
+          echo "cmake exit code: $CMake_EXIT"
+
+          echo "=== Running make ==="
+          make -j$(nproc) > make_build.log 2>&1
+          MAKE_EXIT=$?
+          echo "make exit code: $MAKE_EXIT"
           cd ..
-          mkdir -p libadrenotools
-          find build/ -name "*.so" -exec cp {} libadrenotools/ \;
-          
+          echo "$CMake_EXIT" > /tmp/cmake_exit_code
+          echo "$MAKE_EXIT" > /tmp/make_exit_code
+          echo "::notice::Build exit codes: cmake=$CMake_EXIT make=$MAKE_EXIT"
+          if [ "$CMake_EXIT" -ne 0 ] || [ "$MAKE_EXIT" -ne 0 ]; then
+            echo "::error::Build failed (cmake=$CMake_EXIT make=$MAKE_EXIT) — see the build-logs artifact"
+            exit 1
+          fi
+
+      - name: Diagnose build output directory
+        if: always()
+        run: |
+          {
+            echo "=== Working directory ==="
+            pwd
+            echo "=== Build directory contents ==="
+            ls -la build/ 2>/dev/null || echo "(no build dir)"
+            echo "=== Full build directory tree ==="
+            find build/ -type f 2>/dev/null | head -100
+            echo "=== .so files specifically ==="
+            find build/ -name "*.so" 2>/dev/null || echo "(none found)"
+            echo "=== .a files specifically ==="
+            find build/ -name "*.a" 2>/dev/null || echo "(none found)"
+            echo "=== ffi.h files ==="
+            find build/ -name "ffi.h" 2>/dev/null || echo "(none found)"
+            echo "=== cmake_config.log tail ==="
+            tail -30 build/cmake_config.log 2>/dev/null || echo "(no log)"
+            echo "=== make_build.log tail ==="
+            tail -30 build/make_build.log 2>/dev/null || echo "(no log)"
+          } > diagnostic.log 2>&1
+
+          # Report key findings as annotations (visible in gh run view)
+          SO_COUNT=$(find build/ -name "*.so" 2>/dev/null | wc -l)
+          A_COUNT=$(find build/ -name "*.a" 2>/dev/null | wc -l)
+          if [ "$SO_COUNT" -eq 0 ]; then
+            echo "::error::No .so files found in build/ directory"
+          fi
+          if [ "$A_COUNT" -gt 0 ]; then
+            echo "::notice::Found $A_COUNT .a file(s) in build/"
+          fi
+          echo "::notice::Diagnostic: $SO_COUNT .so files, $A_COUNT .a files in build/"
+
+          # Extract cmake/make error messages
+          CMAKE_EXIT_CODE=$(cat /tmp/cmake_exit_code 2>/dev/null || echo "0")
+          MAKE_EXIT_CODE=$(cat /tmp/make_exit_code 2>/dev/null || echo "0")
+          if [ "$CMAKE_EXIT_CODE" -ne 0 ]; then
+            ERROR_LINE=$(grep -i "error" build/cmake_config.log 2>/dev/null | tail -5)
+            if [ -n "$ERROR_LINE" ]; then
+              echo "::error::CMake error: $ERROR_LINE"
+            fi
+            # Show NOTFOUND variables
+            NOTFOUND=$(grep -i "notfound" build/cmake_config.log 2>/dev/null | tail -5)
+            if [ -n "$NOTFOUND" ]; then
+              echo "::error::CMake NOTFOUND: $NOTFOUND"
+            fi
+          fi
+          if [ "$MAKE_EXIT_CODE" -ne 0 ]; then
+            echo "::error::Make failed with exit code $MAKE_EXIT_CODE"
+            echo "=== Full make_build.log (all lines) ==="
+            cat build/make_build.log 2>/dev/null || echo "(no log)"
+            echo "=== End make_build.log ==="
+          fi
+
+      - name: Collect all build artifacts
+        run: |
+          mkdir -p artifacts
+          echo "=== Collecting .so files (not from the cargo target dir: it holds x86-64 host proc-macros) ==="
+          find build/ -path build/rust -prune -o -name "*.so" -print -exec cp -v {} artifacts/ \;
+          for f in libadrenotools.so libhook_impl.so libmain_hook.so libgsl_alloc_hook.so libfile_redirect_hook.so libbytehook.so libshadowhook.so; do
+            if [ ! -f "artifacts/$f" ]; then echo "::error::missing $f"; MISSING=1; fi
+          done
+          [ -z "$MISSING" ] || exit 1
+          echo "=== Collecting Rust staticlib ==="
+          find build/ -name "libadrenotools_rs.a" -exec cp -v {} artifacts/ \;
+          echo "=== Collecting cxx bridge header ==="
+          find build/ -name "ffi.h" -exec cp -v {} artifacts/ \;
+          echo "=== Collected artifacts ==="
+          ls -la artifacts/ 2>/dev/null || echo "(empty)"
+
+      - name: Show Rust build artifacts (Diagnostic)
+        run: |
+          echo "=== Rust staticlib ==="
+          find build -name "libadrenotools_rs.a" 2>/dev/null || echo "(none - Rust may not be available)"
+          echo "=== C++ shared libs ==="
+          find build -name "*.so" 2>/dev/null || echo "(none)"
+          echo "=== cxx bridge header ==="
+          find build -name "ffi.h" 2>/dev/null || echo "(none - Rust may not be available)"
+
       - name: List files (Diagnostic)
         run: find build -name "*.so"
 
-      - name: Upload any compiled library
+      - name: Upload compiled library
         uses: actions/upload-artifact@v4
         with:
           name: libadrenotools-arm64-v8a
-          path: libadrenotools/*.so
+          path: artifacts/*.so
           if-no-files-found: error
+
+      - name: Upload Rust static library (if built)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libadrenotools-rs-staticlib
+          path: artifacts/libadrenotools_rs.a
+          if-no-files-found: warn
+
+      - name: Upload build logs (diagnostic)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/cmake_config.log
+            build/make_build.log
+            diagnostic.log
+          if-no-files-found: warn
