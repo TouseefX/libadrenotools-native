@@ -27,11 +27,22 @@ The C++ side calls Rust through a compile-time-checked cxx FFI boundary. `hook_g
 
 ### Supported Features
 
-- **Turnip (Adreno)** — Custom Adreno driver loading with per-generation optimizations
+- **Turnip (Adreno)** — Custom Adreno driver loading using the selected driver’s hardware defaults
 - **PanVK (ARM Mali G52)** — Mali GPU detection, PanVK driver loading, mailbox/doorbell register access
 - **Hyper OS (Xiaomi)** — Vulkan path discovery under `/system/vendor`, `/vendor`, `/odm`, `/product`
 - **GPU mailbox** — ARM Mali G52 doorbell/STATUS/IRQ_CLEAR register access
 - **Turbo control** — Opt-in only via `adrenotools_set_turbo()` (can crash KGSL on some kernels)
+
+### Turnip compatibility
+
+The automatic loader leaves Turnip hardware tuning and the `FD_DEV_FEATURES`
+UBWC hint to the selected driver or the app. Previously it enabled the UBWC
+hint on every One UI 6+ Adreno 7xx device and forced cache-coherency and other
+rendering overrides. These settings are not universally appropriate and may
+cause compatibility problems. An app can still set its own environment before
+loading the driver (for example with `adrenotools_set_freedreno_env`). Removing
+these overrides does not guarantee that a particular driver and kernel are
+compatible; diagnosing a reboot requires device-specific kernel logs.
 
 ### Testing
 

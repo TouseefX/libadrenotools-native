@@ -17,6 +17,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check safe Turnip defaults
+        run: python3 -m unittest discover -s tests -v
+
       - name: Set up NDK
         uses: nttld/setup-ndk@v1
         with:
