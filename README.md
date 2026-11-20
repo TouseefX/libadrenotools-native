@@ -27,7 +27,7 @@ The C++ side calls Rust through a compile-time-checked cxx FFI boundary. `hook_g
 
 ### Supported Features
 
-- **Turnip (Adreno)** — Custom Adreno driver loading using the selected driver’s hardware defaults
+- **Turnip (Adreno)** — Custom Adreno driver loading with per-generation optimizations
 - **PanVK (ARM Mali G52)** — Mali GPU detection, PanVK driver loading, mailbox/doorbell register access
 - **Hyper OS (Xiaomi)** — Vulkan path discovery under `/system/vendor`, `/vendor`, `/odm`, `/product`
 - **GPU mailbox** — ARM Mali G52 doorbell/STATUS/IRQ_CLEAR register access
@@ -35,17 +35,13 @@ The C++ side calls Rust through a compile-time-checked cxx FFI boundary. `hook_g
 
 ### Turnip compatibility
 
-The automatic loader defaults `TU_DEBUG` to `noubwc` only when KGSL reports
-an Adreno 650. This is an experimental mitigation for a reported Turnip UBWC
-NoC fault on a related Galaxy S20 FE; it has not been verified on every device
-or driver and may reduce performance. If the GPU model is unavailable, the
-loader does not guess. An existing `TU_DEBUG` is respected (including an empty
-value), so apps can explicitly control their own settings. The setting affects
-Turnip allocations, not all system-wide UBWC use.
-
-The loader no longer forces broad cache-coherency, heap, or `FD_DEV_FEATURES`
-overrides. Neither change guarantees driver and kernel compatibility; diagnosing
-a reboot requires device-specific kernel logs.
+The automatic loader defaults `TU_DEBUG` to `noubwc` when KGSL reports an
+Adreno 650. This is an experimental mitigation for a reported Turnip UBWC NoC
+fault on a related Galaxy S20 FE; it has not been verified on every device or
+driver and may reduce performance. An existing `TU_DEBUG` is respected
+(including an empty value). The setting affects Turnip allocations, not all
+system-wide UBWC use. Other per-generation tuning remains enabled, and an
+unrecognized GPU uses the existing `TU_DEBUG=noconform` default.
 
 ### Testing
 

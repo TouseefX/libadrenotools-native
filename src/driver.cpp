@@ -1028,6 +1028,81 @@ static std::string get_cache_dir_jni(JNIEnv *env, jobject context) {
 
 // ─── Per-GPU environment tuning ──────────────────────────────────────────────
 
+static int parse_adreno_generation(const char *str) {
+    if (!str || !str[0]) return 0;
+    const char *p = str;
+    // Skip past "Adreno" prefix when present so SoC strings like "SM8250" don't
+    // misclassify an Adreno 650 as Adreno 8xx.
+    for (const char *q = str; *q; ++q) {
+        if (std::tolower(static_cast<unsigned char>(q[0])) == 'a' &&
+            std::tolower(static_cast<unsigned char>(q[1])) == 'd' &&
+            std::tolower(static_cast<unsigned char>(q[2])) == 'r' &&
+            std::tolower(static_cast<unsigned char>(q[3])) == 'e' &&
+            std::tolower(static_cast<unsigned char>(q[4])) == 'n' &&
+            std::tolower(static_cast<unsigned char>(q[5])) == 'o') {
+            p = q + 6;
+            break;
+        }
+    }
+    while (*p && !std::isdigit(static_cast<unsigned char>(*p))) ++p;
+    if (*p >= '5' && *p <= '9')
+        return *p - '0';
+    return 0;
+}
+
+static int applyTurnipOptimizations() {
+    char gpuName[64] = {};
+    read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
+
+    int gen = parse_adreno_generation(gpuName);
+    if (gen == 0) {
+        char model[128] = {};
+        read_first_line("/proc/device-tree/model", model, sizeof(model));
+        if (!model[0]) read_first_line("/sys/firmware/devicetree/base/model", model, sizeof(model));
+        if (str_contains_ci(model, "adreno"))
+            gen = parse_adreno_generation(model);
+    }
+
+    // Keep default TU_DEBUG strictly to safe, upstream-valid Turnip flags:
+    //   - Avoid `hiprio`: on Android KGSL submitqueue_priority_count is 1 (MEDIUM only),
+    //     so forcing HIGH makes vkCreateDevice fail with VK_ERROR_INITIALIZATION_FAILED
+    //     ("invalid global priority") whenever globalPriorityQuery is enabled.
+    //   - Avoid `dynamic`: Mesa test flag that disables native tiled VkRenderPass/GMEM.
+    //   - Avoid `deck_emu`: spoofs AMD Steam Deck PCI ID (0x1002), breaking native
+    //     Android games' mobile GPU detection (can still be set via TU_DEBUG env var).
+    //   - Avoid `noflushall`: not a valid Mesa TU_DEBUG token (flushall is off by default).
+    if (gen == 0) {
+        set_default_env("TU_DEBUG", "noconform");
+        return 0;
+    }
+
+    switch (gen) {
+        case 8:
+            ALOGI("Adreno 8xx (%s): cache-coherent path", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+            set_default_env("TU_DEBUG", "noconform");
+            break;
+
+        case 7:
+            ALOGI("Adreno 7xx (%s): autotuner path", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+#ifdef OVERCLOCK
+            set_default_env("TU_DEBUG", "noconform,forcecb");
+#else
+            set_default_env("TU_DEBUG", "noconform");
+#endif
+            break;
+
+        default:
+            ALOGI("Adreno 5xx/6xx (%s): stability path", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+            set_default_env("TU_DEBUG", "noconform");
+            break;
+    }
+
+    return gen;
+}
+
 // PanVK / ARM Mali (e.g. Mali-G52) environment configuration.
 // Only sets Panfrost/PanVK overrides when actually initializing for Mali so
 // Adreno devices never inherit MESA_LOADER_DRIVER_OVERRIDE=panfrost.
@@ -1246,9 +1321,42 @@ static void global_atomic_init() {
         read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpu_model, sizeof(gpu_model));
         if (set_adreno_650_turnip_default(gpu_model))
             ALOGW("Adreno 650: defaulting TU_DEBUG=noubwc as a Turnip compatibility workaround");
-        else
-            ALOGI("Adreno: leaving Turnip tuning unchanged (GPU model: %s)",
-                  gpu_model[0] ? gpu_model : "unknown");
+
+        // ─── Turnip / Adreno-only settings ───
+        set_default_env("TU_ROBUST_BUFFER_ACCESS", "0");
+        set_default_env("TU_GMEM_ALLOW_OVERLAP",   "1");
+        set_default_env("TU_RENDERPASS_CACHE",     "1");
+
+        // Cap Vulkan heap override at 40% of physical RAM (floor 256 MB) to prevent OOM.
+        long pages     = sysconf(_SC_PHYS_PAGES);
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (pages > 0 && page_size > 0) {
+            long long total_mb = (static_cast<long long>(pages) * page_size) / (1024LL * 1024LL);
+            long heap_mb = static_cast<long>((total_mb * 40LL) / 100LL);
+            if (heap_mb < 256) heap_mb = 256;
+
+            char heap_str[24];
+            std::snprintf(heap_str, sizeof(heap_str), "%ld", heap_mb);
+            set_default_env("TU_OVERRIDE_HEAP_SIZE", heap_str);
+            ALOGI("TU_OVERRIDE_HEAP_SIZE=%s MB (40%% of %lld MB RAM)", heap_str, total_mb);
+        }
+
+        int gen = applyTurnipOptimizations();
+
+        // Samsung One UI 6.0+ Adreno 7xx (a7xx_gen2 / S23) v7xx-blob UBWC flag hint.
+        // Scoped to Adreno 7xx so A5xx/A6xx/A8xx never receive an A7xx-only feature hint.
+        if (gen == 7) {
+            char oneui_str[PROP_VALUE_MAX] = {};
+            if (__system_property_get("ro.build.version.oneui", oneui_str) > 0) {
+                int raw = std::atoi(oneui_str);
+                if (raw >= 60000 && sdk >= 30) {
+                    int major = raw / 10000;
+                    int minor = (raw % 10000) / 100;
+                    ALOGI("One UI %d.%d on Adreno 7xx — enabling UBWC flag hint", major, minor);
+                    set_default_env("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1");
+                }
+            }
+        }
     }
 
     // Defer ShadowHook + JNI initialization until after dlopen() releases the

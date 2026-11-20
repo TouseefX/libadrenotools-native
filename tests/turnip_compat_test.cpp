@@ -15,6 +15,9 @@ int main() {
     assert(!std::getenv("TU_DEBUG"));
     assert(set_adreno_650_turnip_default("Adreno (TM) 650"));
     assert(std::strcmp(std::getenv("TU_DEBUG"), "noubwc") == 0);
+    // The restored legacy default must not overwrite the workaround.
+    setenv("TU_DEBUG", "noconform", 0);
+    assert(std::strcmp(std::getenv("TU_DEBUG"), "noubwc") == 0);
     setenv("TU_DEBUG", "sysmem", 1);
     assert(!set_adreno_650_turnip_default("Adreno (TM) 650"));
     assert(std::strcmp(std::getenv("TU_DEBUG"), "sysmem") == 0);
