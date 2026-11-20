@@ -1319,8 +1319,8 @@ static void global_atomic_init() {
         // the root cause on every device. Preserve explicit TU_DEBUG settings.
         char gpu_model[128] = {};
         read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpu_model, sizeof(gpu_model));
-        if (set_adreno_650_turnip_default(gpu_model))
-            ALOGW("Adreno 650: defaulting TU_DEBUG=noubwc as a Turnip compatibility workaround");
+        if (set_adreno_6xx_turnip_default(gpu_model))
+            ALOGW("Adreno 6xx (%s): defaulting TU_DEBUG=noubwc as a Turnip compatibility workaround", gpu_model);
 
         // ─── Turnip / Adreno-only settings ───
         set_default_env("TU_ROBUST_BUFFER_ACCESS", "0");

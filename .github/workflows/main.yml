@@ -17,7 +17,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Test Adreno 650 compatibility workaround
+      - name: Test Adreno 6xx compatibility workaround
         run: |
           python3 -m unittest discover -s tests -v
           c++ -std=c++17 -Wall -Wextra -Werror tests/turnip_compat_test.cpp -o /tmp/turnip_compat_test

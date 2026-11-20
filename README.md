@@ -35,10 +35,11 @@ The C++ side calls Rust through a compile-time-checked cxx FFI boundary. `hook_g
 
 ### Turnip compatibility
 
-The automatic loader defaults `TU_DEBUG` to `noubwc` when KGSL reports an
-Adreno 650. This is an experimental mitigation for a reported Turnip UBWC NoC
-fault on a related Galaxy S20 FE; it has not been verified on every device or
-driver and may reduce performance. An existing `TU_DEBUG` is respected
+The automatic loader defaults `TU_DEBUG` to `noubwc` when KGSL reports
+an Adreno 6xx model. This is an experimental mitigation for a reported Turnip
+UBWC NoC fault on a related Galaxy S20 FE; the reporting project applied the
+workaround to Adreno 6xx, but it has not been verified on every device or driver
+and may reduce performance. An existing `TU_DEBUG` is respected
 (including an empty value). The setting affects Turnip allocations, not all
 system-wide UBWC use. Other per-generation tuning remains enabled, and an
 unrecognized GPU uses the existing `TU_DEBUG=noconform` default.
