@@ -1028,28 +1028,6 @@ static std::string get_cache_dir_jni(JNIEnv *env, jobject context) {
 
 // ─── Per-GPU environment tuning ──────────────────────────────────────────────
 
-static int parse_adreno_generation(const char *str) {
-    if (!str || !str[0]) return 0;
-    const char *p = str;
-    // Skip past "Adreno" prefix when present so SoC strings like "SM8250" don't
-    // misclassify an Adreno 650 as Adreno 8xx.
-    for (const char *q = str; *q; ++q) {
-        if (std::tolower(static_cast<unsigned char>(q[0])) == 'a' &&
-            std::tolower(static_cast<unsigned char>(q[1])) == 'd' &&
-            std::tolower(static_cast<unsigned char>(q[2])) == 'r' &&
-            std::tolower(static_cast<unsigned char>(q[3])) == 'e' &&
-            std::tolower(static_cast<unsigned char>(q[4])) == 'n' &&
-            std::tolower(static_cast<unsigned char>(q[5])) == 'o') {
-            p = q + 6;
-            break;
-        }
-    }
-    while (*p && !std::isdigit(static_cast<unsigned char>(*p))) ++p;
-    if (*p >= '5' && *p <= '9')
-        return *p - '0';
-    return 0;
-}
-
 static int applyTurnipOptimizations() {
     char gpuName[64] = {};
     read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpuName, sizeof(gpuName));
@@ -1093,8 +1071,17 @@ static int applyTurnipOptimizations() {
 #endif
             break;
 
+        case 6:
+            // UBWC is a suspected NoC reset trigger on some Adreno 6xx
+            // devices; nolrz may help with reported Rustudio rendering issues.
+            // Explicit TU_DEBUG values take precedence over these defaults.
+            ALOGI("Adreno 6xx (%s): UBWC/LRZ compatibility path", gpuName);
+            set_default_env("tu_override_uncached_as_cache_coherent", "true");
+            set_default_env("TU_DEBUG", "noconform,noubwc,nolrz");
+            break;
+
         default:
-            ALOGI("Adreno 5xx/6xx (%s): stability path", gpuName);
+            ALOGI("Adreno 5xx/other (%s): stability path", gpuName);
             set_default_env("tu_override_uncached_as_cache_coherent", "true");
             set_default_env("TU_DEBUG", "noconform");
             break;
@@ -1314,14 +1301,6 @@ static void global_atomic_init() {
     if (isMaliGpu()) {
         applyPanvkOptimizations();
     } else {
-        // A related Samsung Adreno 650 device has been reported to hit a
-        // fatal NoC error with Turnip UBWC. This is a mitigation, not proof of
-        // the root cause on every device. Preserve explicit TU_DEBUG settings.
-        char gpu_model[128] = {};
-        read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpu_model, sizeof(gpu_model));
-        if (set_adreno_6xx_turnip_default(gpu_model))
-            ALOGW("Adreno 6xx (%s): defaulting TU_DEBUG=noubwc as a Turnip compatibility workaround", gpu_model);
-
         // ─── Turnip / Adreno-only settings ───
         set_default_env("TU_ROBUST_BUFFER_ACCESS", "0");
         set_default_env("TU_GMEM_ALLOW_OVERLAP",   "1");
