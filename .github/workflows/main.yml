@@ -18,7 +18,10 @@ jobs:
           submodules: recursive
 
       - name: Check safe Turnip defaults
-        run: python3 -m unittest discover -s tests -v
+        run: |
+          python3 -m unittest discover -s tests -v
+          c++ -std=c++17 -Wall -Wextra -Werror tests/turnip_compat_test.cpp -o /tmp/turnip_compat_test
+          /tmp/turnip_compat_test
 
       - name: Set up NDK
         uses: nttld/setup-ndk@v1

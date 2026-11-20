@@ -5,6 +5,7 @@
 #include <adrenotools/driver.h>
 #include "hook/kgsl.h"
 #include "hook/hook_impl_params.h"
+#include "turnip_compat.h"
 
 // When Rust is available, register pending GPU mappings with the Rust
 // GpuMappingManager via the cxx bridge so hook_gsl_memory_alloc_pure_64 can
@@ -1238,10 +1239,16 @@ static void global_atomic_init() {
     if (isMaliGpu()) {
         applyPanvkOptimizations();
     } else {
-        // Leave hardware-dependent Turnip/FD tuning to the selected driver or
-        // the app. Broad GPU-generation/ROM heuristics cannot establish kernel,
-        // firmware or gralloc compatibility, and settings apply process-wide.
-        ALOGI("Adreno: using driver defaults for Turnip hardware tuning");
+        // A related Samsung Adreno 650 device has been reported to hit a
+        // fatal NoC error with Turnip UBWC. This is a mitigation, not proof of
+        // the root cause on every device. Preserve explicit TU_DEBUG settings.
+        char gpu_model[128] = {};
+        read_first_line("/sys/class/kgsl/kgsl-3d0/gpu_model", gpu_model, sizeof(gpu_model));
+        if (set_adreno_650_turnip_default(gpu_model))
+            ALOGW("Adreno 650: defaulting TU_DEBUG=noubwc as a Turnip compatibility workaround");
+        else
+            ALOGI("Adreno: leaving Turnip tuning unchanged (GPU model: %s)",
+                  gpu_model[0] ? gpu_model : "unknown");
     }
 
     // Defer ShadowHook + JNI initialization until after dlopen() releases the
